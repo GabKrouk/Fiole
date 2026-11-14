@@ -333,6 +333,14 @@ def stars(p: float, thresholds=None) -> str:
     return "*" * n if n else "ns"
 
 
+def figure_p_format(cfg: dict) -> str:
+    """One label style for the whole figure: "stars" or "exact". Older figures stored it per annotation."""
+    if cfg.get("p_format") in ("stars", "exact"):
+        return cfg["p_format"]
+    anns = [a for a in cfg.get("annotations") or [] if a.get("type") == "pvalue"]
+    return next((a.get("format") for a in anns if a.get("all")), None) or next((a.get("format") for a in anns), None) or "stars"
+
+
 def p_label(p: float, p_display: str, style: str, thresholds=None) -> str:
     if style == "stars":
         return stars(p, thresholds)
@@ -410,7 +418,7 @@ def render_figure(content: dict, cfg_in: dict, results: dict[str, dict] | None =
             if t_name and t_name not in tests:
                 tests.append(t_name)
         cap += (" Tests : " if lang == "fr" else " Tests: ") + "; ".join(tests) + "."
-        if any(a.get("format") == "stars" for a in p_anns):
+        if figure_p_format(cfg) == "stars":
             th = sorted([float(t) for t in (cfg.get("star_thresholds") or DEFAULT_STARS)], reverse=True)
             parts = [f"{'*' * (i + 1)} p < {t:g}" for i, t in enumerate(th)]
             ns = f"ns p ≥ {th[0]:g}"
@@ -595,10 +603,13 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
     lo, hi = _group_values_range(sel, cfg)
     all_ann = cfg.get("annotations") or []
     names = [g.name for g in sel]
-    brackets = []  # (annotation index, comparison, stale)
-    for k, a in enumerate(all_ann):
-        if a.get("type") != "pvalue":
-            continue
+    brackets = []  # (annotation index, comparison, label)
+    p_idx = [k for k, a in enumerate(all_ann) if a.get("type") == "pvalue"]
+    # One label style for the whole figure (stars or exact p). Older figures stored it per annotation.
+    p_format = figure_p_format(cfg)
+    seen_pairs: set[frozenset] = set()  # one bracket per pair of groups, whatever the number of annotations
+    for k in sorted(p_idx, key=lambda j: (not all_ann[j].get("all"), -j)):  # "all pairs" sets first, newest first
+        a = all_ann[k]
         entry = results.get(a.get("analysis_id"))
         if not entry or entry["result"].get("status") != "ok":
             warnings.append({"en": "A p-value annotation refers to an analysis that has no valid result. Run the analysis first.",
@@ -615,7 +626,11 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
             warnings.append({"en": "A p-value shown comes from an analysis computed on an older version of the data or settings. Re-run it.",
                              "fr": "Une valeur de p affichée provient d’une analyse calculée sur une ancienne version des données ou des réglages. Relancez-la."})
         for c in shown:
-            label = p_label(c["p"], c["p_display"], a.get("format", "exact"), cfg.get("star_thresholds"))
+            pair = frozenset((c["group1"], c["group2"]))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            label = p_label(c["p"], c["p_display"], p_format, cfg.get("star_thresholds"))
             if label == "ns" and cfg.get("hide_ns"):
                 continue
             brackets.append((k, c, label))
@@ -639,6 +654,7 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
     needed = (bracket_gap + (n_levels - 1) * level_h + 1.2 + fs * 0.9 + 2.0) if n_levels else 0.0
     hi_target = hi
     extra_top = 0.0
+    above_plot = False
     ylo, yhi, yticks, log = _y_axis(cfg, lo, hi_target, include_zero=include_zero, warnings=[])
     if n_levels:
         auto_range = cfg["y_max"] is None and not log
@@ -651,24 +667,25 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
             needed = bracket_gap + (n_levels - 1) * level_h + 1.2 + fs * 0.9 + 2.0
         max_extra = max(hp0 - 25.0, 0.0)
         for _ in range(12):
-            scratch = SVG(svg.w, svg.h, cfg)
-            _l, _r, ptop, pbottom, pys, _rot = _frame(scratch, cfg, len(sel), labels, ylo, yhi, yticks, log, extra_top=extra_top)
-            anchor = max(min(pys(hi), pbottom), ptop)
-            room = anchor - (ptop - extra_top)  # space between the bracket anchor and the title area
-            if room >= needed - 0.01:
+            _l, _r, ptop, pbottom, pys, _rot = _frame(SVG(svg.w, svg.h, cfg), cfg, len(sel), labels, ylo, yhi, yticks, log)
+            # the whole stack must fit between the highest value and the top of the plot, clear of the frame line
+            inside_room = min(pys(hi), pbottom) - ptop if hi <= yhi else -1.0
+            if inside_room >= needed + 2.0:
                 break
             hp = pbottom - ptop
-            if auto_range and extra_top == 0 and needed < hp * 0.8:
-                # solve (yhi - hi) / (yhi - ylo) * hp >= needed for yhi, then let nice_range round it up
-                hi_target = max(hi_target, (hi * hp - needed * ylo) / (hp - needed)) + (hi - lo or 1.0) * 1e-3
+            if auto_range and needed < hp * 0.8:
+                # solve (yhi - hi) / (yhi - ylo) * hp >= needed + 2 for yhi, then let nice_range round it up
+                want = needed + 2.0
+                hi_target = max(hi_target, (hi * hp - want * ylo) / (hp - want)) + (hi - lo or 1.0) * 1e-3
                 ylo, yhi, yticks, log = _y_axis(cfg, lo, hi_target, include_zero=include_zero, warnings=[])
-            else:
-                auto_range = False
-                if extra_top >= max_extra:
-                    warnings.append({"en": "The figure is too small to show every significance bracket clearly: enlarge it or hide “ns”.",
-                                     "fr": "La figure est trop petite pour afficher clairement tous les crochets de significativité : agrandissez-la ou masquez les « ns »."})
-                    break
-                extra_top = min(extra_top + needed - room, max_extra)
+                continue
+            # fixed Y range (or log scale): draw the whole stack above the plot, in an enlarged top margin
+            above_plot = True
+            extra_top = min(needed, max_extra)
+            if needed > max_extra:
+                warnings.append({"en": "The figure is too small to show every significance bracket clearly: enlarge it or hide “ns”.",
+                                 "fr": "La figure est trop petite pour afficher clairement tous les crochets de significativité : agrandissez-la ou masquez les « ns »."})
+            break
     ylo, yhi, yticks, log = _y_axis(cfg, lo, hi_target, include_zero=include_zero, warnings=warnings)
     left, right, top, bottom, ys, rotate = _frame(svg, cfg, len(sel), labels, ylo, yhi, yticks, log, extra_top=extra_top)
 
@@ -754,7 +771,7 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
     # p-value brackets / stars: only from saved analysis results
     for k, c, label, i1, i2, lvl in layout:
         x1, x2 = left + band * (i1 + 0.5), left + band * (i2 + 0.5)
-        ybase = max(min(ys(hi), bottom), top) - bracket_gap - lvl * level_h
+        ybase = (top if above_plot else min(ys(hi), bottom)) - bracket_gap - lvl * level_h
         tick = 3
         svg.open("pvalue", index=k)
         svg.add(

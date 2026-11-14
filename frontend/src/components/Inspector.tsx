@@ -120,13 +120,10 @@ export default function Inspector({ sel, cfg, set, canEdit, isGroup, colorOf, ro
     }
     case "pvalue": {
       const k = sel.index ?? -1;
-      const a = (cfg.annotations ?? [])[k] ?? {};
-      const upd = (p: Cfg) => { const n = [...(cfg.annotations ?? [])]; n[k] = { ...a, ...p }; set({ annotations: n }); };
       title = T("Significativité", "Significance");
       body = <>
         <div className="row" style={{ marginBottom: 8 }}>
-          <button className={`small ${a.format === "stars" ? "primary" : ""}`} disabled={!canEdit} onClick={() => upd({ format: "stars" })}>★ {T("Étoiles", "Stars")}</button>
-          <button className={`small ${a.format !== "stars" ? "primary" : ""}`} disabled={!canEdit} onClick={() => upd({ format: "exact" })}>p = …</button>
+          <PFormat cfg={cfg} set={set} canEdit={canEdit} />
           <label className="check" style={{ marginBottom: 0 }}><input type="checkbox" disabled={!canEdit} checked={!!cfg.hide_ns} onChange={(e) => set({ hide_ns: e.target.checked })} /> {T("Masquer « ns »", "Hide “ns”")}</label>
         </div>
         <StarThresholds cfg={cfg} set={set} canEdit={canEdit} />
@@ -185,6 +182,24 @@ export function StarThresholds({ cfg, set, canEdit }: { cfg: Cfg; set: (p: Cfg) 
         ))}
         {cfg.star_thresholds && <button className="ghost small" disabled={!canEdit} onClick={() => set({ star_thresholds: null })}>↺</button>}
       </div>
+    </div>
+  );
+}
+
+/** One label style for the whole figure (same rule as the server renderer). */
+export function figurePFormat(cfg: Cfg): "stars" | "exact" {
+  if (cfg.p_format === "stars" || cfg.p_format === "exact") return cfg.p_format;
+  const anns: Cfg[] = (cfg.annotations ?? []).filter((a: Cfg) => a.type === "pvalue");
+  return (anns.find((a) => a.all)?.format ?? anns[0]?.format ?? "stars") === "exact" ? "exact" : "stars";
+}
+
+export function PFormat({ cfg, set, canEdit }: { cfg: Cfg; set: (p: Cfg) => void; canEdit: boolean }) {
+  const { lang } = useI18n();
+  const f = figurePFormat(cfg);
+  return (
+    <div className="row tight" role="radiogroup" aria-label={lang === "fr" ? "Affichage" : "Display"}>
+      <label className="check" style={{ marginBottom: 0 }}><input type="radio" name="p_format" disabled={!canEdit} checked={f === "stars"} onChange={() => set({ p_format: "stars" })} /> ★ {lang === "fr" ? "Étoiles" : "Stars"}</label>
+      <label className="check" style={{ marginBottom: 0 }}><input type="radio" name="p_format" disabled={!canEdit} checked={f === "exact"} onChange={() => set({ p_format: "exact" })} /> {lang === "fr" ? "Valeur de p (p = …)" : "p-value (p = …)"}</label>
     </div>
   );
 }

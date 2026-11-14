@@ -200,3 +200,43 @@ def test_pairwise_caption_holm_default():
                             "annotations": [{"type": "pvalue", "analysis_id": "A", "all": True, "format": "stars"}]},
                         results={"A": {"result": res, "stale": False}}, lang="fr")
     assert "Welch" in out["caption"] and "Holm" in out["caption"]
+
+
+@pytest.mark.parametrize("y_max", [None, 9])
+def test_gab_scenario_one_bracket_per_pair_single_format_clear_of_frame(y_max):
+    """4 groups, all pairs, plus older single-pair annotations on the same pair (one exact, one stars),
+    closed frame: one bracket per pair, one label style, nothing crossing the frame or the title."""
+    import re
+    from app.figures.render import render_figure
+    c = _four_groups()
+    res = run_analysis("pairwise", c, {"group_col": "g", "value_col": "a"})
+    single = run_analysis("ttest", c, {"group_col": "g", "value_col": "a", "groups": ["Col", "tga1"], "variant": "welch"})
+    anns = [{"type": "pvalue", "analysis_id": "S", "format": "exact"},
+            {"type": "pvalue", "analysis_id": "A", "format": "exact"},
+            {"type": "pvalue", "analysis_id": "A", "all": True, "format": "stars"}]
+    cfg = {"type": "box", "group_col": "g", "value_col": "a", "title": "Yo this is great", "frame": "closed",
+           "show_points": True, "hide_ns": True, "y_min": 6 if y_max else None, "y_max": y_max, "annotations": anns}
+    results = {"A": {"result": res, "stale": False}, "S": {"result": single, "stale": False}}
+    out = render_figure(c, cfg, results=results)
+    svg = out["svg"]
+    groups = re.findall(r'<g data-el="pvalue"[^>]*>(.*?)</g>', svg, flags=re.S)
+    labels = re.findall(r'class="pvalue-label"[^>]*>([^<]*)<', svg)
+    n_sig = sum(1 for x in res["comparisons"] if x["p"] < 0.05)
+    assert len(groups) == n_sig  # one bracket per significant pair, no duplicates
+    assert all(set(l) == {"*"} for l in labels), labels  # stars only, never mixed with "p = …"
+    # frame top line (closed frame) and title
+    fr = re.search(r'<g data-el="frame">\s*<line x1="[\d.]+" y1="([\d.]+)"', svg)
+    frame_top = float(fr.group(1))
+    for g in groups:
+        ys = [float(v) for v in re.findall(r'[ML][\d.]+,([\d.]+)', g)]
+        ty = [float(v) for v in re.findall(r'<text[^>]* y="([\d.]+)"', g)]
+        span = (min(ys + [t - 8 for t in ty]), max(ys + ty))
+        inside = span[0] > frame_top + 0.5
+        above = span[1] < frame_top - 0.5
+        assert inside or above, (y_max, span, frame_top)  # never across the frame line
+        assert span[0] >= 4 + 9 + 1  # below the title
+    # global switch to exact p-values applies to every bracket
+    out = render_figure(c, {**cfg, "p_format": "exact"}, results=results)
+    labels = re.findall(r'class="pvalue-label"[^>]*>([^<]*)<', out["svg"])
+    assert labels and all(l.startswith("p ") for l in labels), labels
+    assert "* p &lt; 0.05" not in out["caption"] and "* p < 0.05" not in out["caption"]

@@ -6,7 +6,7 @@ import type { ProjectCtx } from "../pages/ProjectPage";
 import { groupNames, StepButtons } from "./AnalysisView";
 import { factorColumns, levels, numericColumns } from "../columns";
 import FigureCanvas, { Selection } from "./FigureCanvas";
-import Inspector, { StarThresholds } from "./Inspector";
+import Inspector, { figurePFormat, PFormat, StarThresholds } from "./Inspector";
 import type { Analysis } from "../api";
 
 const PRESETS: Record<string, { label: [string, string]; cfg: Record<string, unknown> }> = {
@@ -256,8 +256,10 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
         aid = a.id;
       }
       await api.post(`/api/projects/${pid}/analyses/${aid}/run`);
-      const ann = { type: "pvalue", analysis_id: aid, all: true, format: "stars" };
-      set({ annotations: existing >= 0 ? annotations.map((a, i) => (i === existing ? { ...a, ...ann, format: a.format ?? "stars" } : a)) : [...annotations, ann] });
+      const ann = { type: "pvalue", analysis_id: aid, all: true };
+      // the automatic set replaces any earlier bracket from the same analysis: one bracket per pair
+      const others = annotations.filter((a) => !(a.type === "pvalue" && (a.all || a.analysis_id === aid)));
+      set({ annotations: [...others, ann], p_format: figurePFormat(cfg) });
       await ctx.reload();
     } catch (e) {
       setRenderErr(e instanceof ApiError ? JSON.stringify(e.detail) : String(e));
@@ -513,7 +515,8 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                           <option value="bonferroni">Bonferroni</option>
                           <option value="none">{lang === "fr" ? "Aucune" : "None"}</option></select></label>
                     </div>
-                    <StarThresholds cfg={cfg} set={set} canEdit={canEdit} />
+                    <div className="field"><span>{lang === "fr" ? "Afficher sur la figure" : "Show on the figure"}</span><PFormat cfg={cfg} set={set} canEdit={canEdit} /></div>
+                    {figurePFormat(cfg) === "stars" && <StarThresholds cfg={cfg} set={set} canEdit={canEdit} />}
                     <label className="check"><input type="checkbox" disabled={!canEdit} checked={!!cfg.hide_ns} onChange={(e) => set({ hide_ns: e.target.checked })} /> {lang === "fr" ? "Masquer les comparaisons « ns »" : "Hide “ns” comparisons"}</label>
                     <button className="primary small" disabled={!canEdit || starsBusy || order.length < 2} onClick={autoStars}>
                       {starsBusy ? "…" : annotations.some((a) => a.type === "pvalue" && a.all) ? (lang === "fr" ? "Recalculer les étoiles" : "Recompute stars") : (lang === "fr" ? "Ajouter les étoiles" : "Add stars")}</button>
@@ -527,13 +530,11 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                       <select className="grow" value={a.analysis_id} disabled={!canEdit} onChange={(e) => { const n = [...annotations]; n[i] = { ...a, analysis_id: e.target.value }; set({ annotations: n }); }}>
                         {pAnalyses.map((x) => <option key={x.id} value={x.id}>{x.name} ({x.last_result!.result.comparisons![0].group1} vs {x.last_result!.result.comparisons![0].group2}) {x.status === "stale" ? `— ${t("stale")}` : ""}</option>)}
                       </select>
-                      <select value={a.format ?? "exact"} disabled={!canEdit} onChange={(e) => { const n = [...annotations]; n[i] = { ...a, format: e.target.value }; set({ annotations: n }); }} aria-label={t("pFormat")}>
-                        <option value="exact">{t("pExact")}</option><option value="stars">{t("pStars")}</option></select>
                       <button className="ghost small" disabled={!canEdit} onClick={() => set({ annotations: annotations.filter((_, j) => j !== i) })}>×</button>
                     </div>
                   ) : null)}
                   {pAnalyses.length === 0 ? <p className="small-text muted">{t("noAnalysisForP")}</p>
-                    : <button className="small" disabled={!canEdit} onClick={() => set({ annotations: [...annotations, { type: "pvalue", analysis_id: pAnalyses[0].id, format: "exact" }] })}>+ {t("addPValue")}</button>}
+                    : <button className="small" disabled={!canEdit} onClick={() => set({ annotations: [...annotations, { type: "pvalue", analysis_id: pAnalyses[0].id }] })}>+ {t("addPValue")}</button>}
                   <hr style={{ border: "none", borderTop: "1px solid var(--line-2)", margin: "10px 0" }} />
                 </>
               )}
