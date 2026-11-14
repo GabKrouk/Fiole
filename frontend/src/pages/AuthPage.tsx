@@ -13,6 +13,8 @@ export default function AuthPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [donate, setDonate] = useState(false);
+  const from = (loc.state as { from?: string } | null)?.from || "";
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -24,9 +26,9 @@ export default function AuthPage() {
       const u =
         mode === "login"
           ? await api.post<User>("/api/auth/login", { email, password })
-          : await api.post<User>("/api/auth/register", { email, password, display_name: name || email.split("@")[0], locale: lang });
+          : await api.post<User>("/api/auth/register", { email, password, display_name: name || email.split("@")[0], locale: lang, donation_opt_in: donate });
       setUser(u);
-      nav((loc.state as { from?: string } | null)?.from || "/");
+      nav(from || "/");
     } catch (err) {
       const code = err instanceof ApiError ? err.detail?.code : "";
       setError(code === "bad_credentials" ? t("badCredentials") : code === "email_taken" ? t("emailTaken") : `${t("error")}: ${code || String(err)}`);
@@ -43,13 +45,24 @@ export default function AuthPage() {
           <button type="button" className="ghost small" onClick={() => setLang(lang === "fr" ? "en" : "fr")}>{t("lang")}</button>
         </div>
         <p className="muted" style={{ marginBottom: 20 }}>{t("appTagline")}</p>
+        {from.startsWith("/p/") && <div className="notice info">{lang === "fr" ? "Connectez-vous (ou créez un compte gratuit) pour ouvrir le projet qu’on vous a partagé." : "Sign in (or create a free account) to open the project shared with you."}</div>}
         <h2>{mode === "login" ? t("signIn") : t("signUp")}</h2>
         {mode === "register" && (
           <label className="field"><span>{t("displayName")}</span><input value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" /></label>
         )}
         <label className="field"><span>{t("email")}</span><input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" /></label>
         <label className="field"><span>{t("password")}</span><input type="password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} /></label>
+        {mode === "register" && (
+          <label className="check consent">
+            <input type="checkbox" checked={donate} onChange={(e) => setDonate(e.target.checked)} />
+            <span>{lang === "fr" ? "Recevoir l’appel aux dons annuel" : "Receive the yearly donation appeal"}<br />
+              <span className="small-text muted">{lang === "fr"
+                ? "Fiole est gratuit. Une fois par an, au plus, nous pourrons vous écrire pour demander un soutien. Facultatif, modifiable à tout moment dans « Mon compte »."
+                : "Fiole is free. At most once a year we may write to ask for support. Optional, change it any time in “My account”."}</span></span>
+          </label>
+        )}
         {error && <div className="notice error" role="alert">{error}</div>}
+        {mode === "register" && <p className="small-text muted">{lang === "fr" ? "Votre email sert à votre compte, au partage, et au suivi d’utilisation de Fiole. Il n’est jamais vendu ni transmis." : "Your email is used for your account, sharing, and Fiole usage statistics. It is never sold or passed on."}</p>}
         <button className="primary" style={{ width: "100%", justifyContent: "center", marginTop: 6 }} disabled={busy}>
           {mode === "login" ? t("signIn") : t("signUp")}
         </button>

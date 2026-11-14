@@ -9,7 +9,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import or_, select
@@ -17,8 +17,8 @@ from sqlalchemy.orm import Session
 
 from . import importers
 from .auth import create_session, current_user, delete_session, hash_password, verify_password
-from .authz import Action, allowed_actions, require
-from .config import COOKIE_SECURE, MAX_UPLOAD_BYTES, SESSION_COOKIE, SESSION_DAYS
+from .authz import LINK_ROLE, Action, allowed_actions, effective_role, require
+from .config import ADMIN_EMAILS, COOKIE_SECURE, MAX_UPLOAD_BYTES, SESSION_COOKIE, SESSION_DAYS
 from .db import Base, engine, get_db
 from .figures.render import FigureError, render_figure, to_pdf, to_png
 from .models import (
@@ -32,20 +32,38 @@ from .models import (
     ProjectMember,
     RawUpload,
     FigureStyle,
+    FigureStyleShare,
+    GeneralAccess,
+    ProjectLinkVisit,
+    ADDED_COLUMNS,
     Role,
     StyleVisibility,
     User,
 )
+from . import mailer
+from . import usage_report
+from . import sharing
 from . import styles as style_lib
 from .stats import ENGINE, catalog, run_analysis
 
 @asynccontextmanager
 async def lifespan(_app):
     Base.metadata.create_all(engine)
+    add_missing_columns()
     yield
 
 
+def add_missing_columns():
+    if engine.dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        for table, col, ddl in ADDED_COLUMNS:
+            conn.execute(text(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl}'))
+
+
 app = FastAPI(title="Fiole API", version="0.1.0", lifespan=lifespan)
+app.include_router(sharing.router)
 
 
 def utcnow():
@@ -68,6 +86,7 @@ class RegisterIn(BaseModel):
     password: str = Field(min_length=8, max_length=200)
     display_name: str = Field(min_length=1, max_length=200)
     locale: Literal["fr", "en"] = "fr"
+    donation_opt_in: bool = False  # explicit, unticked by default
 
 
 class LoginIn(BaseModel):
@@ -75,8 +94,28 @@ class LoginIn(BaseModel):
     password: str
 
 
+def is_admin(u: User) -> bool:
+    return u.email.lower() in ADMIN_EMAILS
+
+
 def user_out(u: User) -> dict:
-    return {"id": u.id, "email": u.email, "display_name": u.display_name, "locale": u.locale}
+    return {"id": u.id, "email": u.email, "display_name": u.display_name, "locale": u.locale,
+            "donation_opt_in": u.donation_opt_in, "donation_opt_in_at": u.donation_opt_in_at.isoformat() if u.donation_opt_in_at else None,
+            "is_admin": is_admin(u)}
+
+
+def set_donation_consent(db: Session, u: User, value: bool, source: str) -> None:
+    u.donation_opt_in = value
+    u.donation_opt_in_at = utcnow()
+    # the audit log keeps every change of mind, with its date (GDPR proof of consent)
+    audit(db, u, None, "consent.donation_appeal", "user", u.id, value=value, source=source)
+
+
+def signed_in(db: Session, u: User) -> None:
+    u.last_login_at = utcnow()
+    u.login_count = (u.login_count or 0) + 1
+    sharing.accept_invites(db, u)
+    usage_report.report_login(u.email)
 
 
 def _set_cookie(resp: Response, token: str):
@@ -95,6 +134,9 @@ def register(body: RegisterIn, response: Response, db: Session = Depends(get_db)
         raise HTTPException(409, detail={"code": "email_taken"})
     u = User(email=email, display_name=body.display_name.strip(), password_hash=hash_password(body.password), locale=body.locale)
     db.add(u)
+    db.flush()
+    set_donation_consent(db, u, body.donation_opt_in, "signup")
+    signed_in(db, u)
     db.commit()
     _set_cookie(response, create_session(db, u))
     return user_out(u)
@@ -105,6 +147,8 @@ def login(body: LoginIn, response: Response, db: Session = Depends(get_db)):
     u = db.execute(select(User).where(User.email == body.email.strip().lower())).scalar_one_or_none()
     if u is None or not verify_password(body.password, u.password_hash):
         raise HTTPException(401, detail={"code": "bad_credentials"})
+    signed_in(db, u)
+    db.commit()
     _set_cookie(response, create_session(db, u))
     return user_out(u)
 
@@ -125,6 +169,7 @@ def me(user: User = Depends(current_user)):
 class MeIn(BaseModel):
     locale: Literal["fr", "en"] | None = None
     display_name: str | None = None
+    donation_opt_in: bool | None = None
 
 
 @app.patch("/api/auth/me")
@@ -134,6 +179,8 @@ def update_me(body: MeIn, user: User = Depends(current_user), db: Session = Depe
         u.locale = body.locale
     if body.display_name:
         u.display_name = body.display_name.strip()
+    if body.donation_opt_in is not None and body.donation_opt_in != u.donation_opt_in:
+        set_donation_consent(db, u, body.donation_opt_in, "settings")
     db.commit()
     return user_out(u)
 
@@ -152,17 +199,20 @@ class ProjectPatch(BaseModel):
     version: int
 
 
-def project_summary(db: Session, p: Project, user: User, member: ProjectMember | None = None) -> dict:
+def project_summary(db: Session, p: Project, user: User, member: ProjectMember | None = None, opened_at=None) -> dict:
+    role = member.role.value if member else (LINK_ROLE[p.general_access].value if p.general_access in LINK_ROLE else None)
+    opened = member.last_opened_at if member else opened_at
     return {
         "id": p.id,
         "name": p.name,
         "description": p.description,
         "owner": {"id": p.owner.id, "display_name": p.owner.display_name, "email": p.owner.email},
-        "role": member.role.value if member else None,
+        "role": role,
+        "via_link": member is None,
         "version": p.version,
         "created_at": p.created_at.isoformat(),
         "updated_at": p.updated_at.isoformat(),
-        "last_opened_at": member.last_opened_at.isoformat() if member and member.last_opened_at else None,
+        "last_opened_at": opened.isoformat() if opened else None,
         "url": f"/p/{p.id}",
     }
 
@@ -180,7 +230,19 @@ def list_projects(scope: Literal["mine", "shared", "recent"] = "mine", user: Use
         q = q.where(Project.owner_id != user.id).order_by(Project.updated_at.desc())
     else:
         q = q.where(ProjectMember.last_opened_at.is_not(None)).order_by(ProjectMember.last_opened_at.desc()).limit(20)
-    return [project_summary(db, p, user, m) for p, m in db.execute(q).all()]
+    out = [project_summary(db, p, user, m) for p, m in db.execute(q).all()]
+    if scope != "mine":
+        # projects opened through "anyone with the link" (listed while the link stays open)
+        visits = db.execute(
+            select(Project, ProjectLinkVisit).join(ProjectLinkVisit, ProjectLinkVisit.project_id == Project.id)
+            .where(ProjectLinkVisit.user_id == user.id, Project.deleted_at.is_(None), Project.general_access != GeneralAccess.restricted)
+        ).all()
+        seen = {o["id"] for o in out}
+        out += [project_summary(db, p, user, None, v.last_opened_at) for p, v in visits if p.id not in seen]
+        key = "updated_at" if scope == "shared" else "last_opened_at"
+        out.sort(key=lambda o: o[key] or "", reverse=True)
+        out = out[:20] if scope == "recent" else out
+    return out
 
 
 @app.post("/api/projects")
@@ -243,7 +305,9 @@ def get_project(project_id: str, user: User = Depends(current_user), db: Session
     m = db.execute(select(ProjectMember).where(ProjectMember.project_id == p.id, ProjectMember.user_id == user.id)).scalar_one_or_none()
     if m:
         m.last_opened_at = utcnow()
-        db.commit()
+    else:
+        sharing.record_link_visit(db, p, user)
+    db.commit()
     datasets = db.execute(select(Dataset).where(Dataset.project_id == p.id).order_by(Dataset.created_at)).scalars().all()
     ds_versions = {d.id: d.version for d in datasets}
     analyses = db.execute(select(Analysis).where(Analysis.project_id == p.id).order_by(Analysis.created_at)).scalars().all()
@@ -837,11 +901,35 @@ def _new_style(db: Session, user: User, name: str, description: str, settings: d
     return st
 
 
+def _style_full(db: Session, st: FigureStyle, user: User) -> dict:
+    out = style_lib.style_out(st, user, st_owner_name(db, st))
+    if st.owner_id == user.id:
+        out["shared_with"] = [{"user_id": u.id, "email": u.email, "display_name": u.display_name}
+                              for u in db.execute(select(User).join(FigureStyleShare, FigureStyleShare.user_id == User.id)
+                                                  .where(FigureStyleShare.style_id == st.id).order_by(User.email)).scalars()]
+    return out
+
+
+def st_owner_name(db: Session, st: FigureStyle) -> str:
+    o = db.get(User, st.owner_id)
+    return o.display_name if o else ""
+
+
 @app.get("/api/styles")
 def list_styles(user: User = Depends(current_user), db: Session = Depends(get_db)):
     mine = db.execute(select(FigureStyle).where(FigureStyle.owner_id == user.id).order_by(FigureStyle.name)).scalars().all()
-    # Phase 2: styles shared with me and public styles of other users will be listed here.
-    return {"mine": [style_lib.style_out(st, user, user.display_name) for st in mine], "shared": [], "public": [], "sharing_available": False}
+    shared = db.execute(
+        select(FigureStyle).join(FigureStyleShare, FigureStyleShare.style_id == FigureStyle.id)
+        .where(FigureStyleShare.user_id == user.id, FigureStyle.owner_id != user.id,
+               FigureStyle.visibility.in_([StyleVisibility.shared, StyleVisibility.public]))
+        .order_by(FigureStyle.name)).scalars().all()
+    seen = {st.id for st in shared}
+    public = db.execute(select(FigureStyle).where(FigureStyle.visibility == StyleVisibility.public, FigureStyle.owner_id != user.id)
+                        .order_by(FigureStyle.updated_at.desc()).limit(200)).scalars().all()
+    return {"mine": [_style_full(db, st, user) for st in mine],
+            "shared": [_style_full(db, st, user) for st in shared],
+            "public": [_style_full(db, st, user) for st in public if st.id not in seen],
+            "sharing_available": True}
 
 
 @app.post("/api/styles")
@@ -854,8 +942,9 @@ def update_style(style_id: str, body: StyleUpdate, user: User = Depends(current_
     st = _get_style(db, user, style_id, own=True)
     if body.version != st.version:
         conflict("style", st.version)
-    if body.visibility and body.visibility != "private":
-        raise HTTPException(400, detail={"code": "sharing_not_available", "message": {"en": "Sharing styles is coming soon.", "fr": "Le partage des styles arrive bientôt."}})
+    if body.visibility:
+        st.visibility = StyleVisibility(body.visibility)
+        audit(db, user, None, "style.visibility", "style", st.id, value=body.visibility)
     if body.name is not None:
         st.name = body.name.strip()
     if body.description is not None:
@@ -867,7 +956,64 @@ def update_style(style_id: str, body: StyleUpdate, user: User = Depends(current_
     st.version += 1
     st.updated_at = utcnow()
     db.commit()
-    return style_lib.style_out(st, user, user.display_name)
+    return _style_full(db, st, user)
+
+
+class StyleShareIn(BaseModel):
+    emails: list[str] = Field(min_length=1, max_length=50)
+    notify: bool = True
+
+
+@app.post("/api/styles/{style_id}/shares")
+def share_style(style_id: str, body: StyleShareIn, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Share a style with people who have a Fiole account (they can apply it and copy it into their styles)."""
+    st = _get_style(db, user, style_id, own=True)
+    added, unknown = [], []
+    for raw in body.emails:
+        email = raw.strip().lower()
+        if not email:
+            continue
+        target = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
+        if target is None:
+            unknown.append(email)
+            continue
+        if target.id == user.id:
+            continue
+        if not db.execute(select(FigureStyleShare).where(FigureStyleShare.style_id == st.id, FigureStyleShare.user_id == target.id)).first():
+            db.add(FigureStyleShare(style_id=st.id, user_id=target.id))
+            added.append(target)
+    if added and st.visibility == StyleVisibility.private:
+        st.visibility = StyleVisibility.shared
+        st.version += 1
+    audit(db, user, None, "style.share", "style", st.id, n=len(added))
+    db.commit()
+    mail = {}
+    if body.notify:
+        url = sharing.public_url(request)
+        for t in added:
+            mail[t.email] = sharing.notify(
+                db, t.email, t.locale,
+                (f"{user.display_name} a partagé un style de figure avec vous : « {st.name} »", f"{user.display_name} shared a figure style with you: “{st.name}”"),
+                (f"{user.display_name} ({user.email}) a partagé le style « {st.name} » avec vous.\n\nDans une figure : « Style rapide » → « Partagés avec moi ».\n{url}\n\n— Fiole",
+                 f"{user.display_name} ({user.email}) shared the style “{st.name}” with you.\n\nIn a figure: “Quick style” → “Shared with me”.\n{url}\n\n— Fiole"),
+                None, "style_share")
+        db.commit()
+    return {"style": _style_full(db, st, user), "unknown": unknown, "email": mail}
+
+
+@app.delete("/api/styles/{style_id}/shares/{user_id}")
+def unshare_style(style_id: str, user_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    st = _get_style(db, user, style_id, own=True)
+    sh = db.execute(select(FigureStyleShare).where(FigureStyleShare.style_id == st.id, FigureStyleShare.user_id == user_id)).scalar_one_or_none()
+    if sh:
+        db.delete(sh)
+        db.flush()
+        if st.visibility == StyleVisibility.shared and not db.execute(select(FigureStyleShare).where(FigureStyleShare.style_id == st.id)).first():
+            st.visibility = StyleVisibility.private
+            st.version += 1
+        audit(db, user, None, "style.unshare", "style", st.id)
+        db.commit()
+    return _style_full(db, st, user)
 
 
 @app.delete("/api/styles/{style_id}")
@@ -978,6 +1124,46 @@ async def import_archive(file: UploadFile = File(...), user: User = Depends(curr
         db.add(AnalysisResult(analysis_id=a.id, analysis_version=a.version, dataset_version=d.version, result=res, engine_version=ENGINE, created_by=user.id))
     db.commit()
     return {"id": p.id, "url": f"/p/{p.id}"}
+
+
+# ------------------------------------------------------------------ admin (FIOLE_ADMIN_EMAILS)
+
+
+def require_admin(user: User = Depends(current_user)) -> User:
+    if not is_admin(user):
+        raise HTTPException(403, detail={"code": "admin_only"})
+    return user
+
+
+@app.get("/api/admin/summary")
+def admin_summary(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    from sqlalchemy import func
+    total = db.scalar(select(func.count()).select_from(User))
+    opted = db.scalar(select(func.count()).select_from(User).where(User.donation_opt_in.is_(True)))
+    declined = db.scalar(select(func.count()).select_from(User).where(User.donation_opt_in.is_(False)))
+    since = datetime.now(timezone.utc).replace(microsecond=0)
+    from datetime import timedelta
+    active30 = db.scalar(select(func.count()).select_from(User).where(User.last_login_at >= since - timedelta(days=30)))
+    projects = db.scalar(select(func.count()).select_from(Project).where(Project.deleted_at.is_(None)))
+    return {"accounts": total, "donation_opt_in": opted, "donation_declined": declined, "donation_not_asked": total - opted - declined,
+            "active_30_days": active30, "projects": projects, "email_configured": mailer.configured(), "email_provider": mailer.provider(),
+            "usage_dashboard": usage_report.configured()}
+
+
+@app.get("/api/admin/donation-optins.csv")
+def admin_donors_csv(user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Only people who explicitly opted in to the yearly donation appeal (GDPR: never the others)."""
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["email", "display_name", "locale", "opted_in_at", "account_created_at", "last_login_at"])
+    for u in db.execute(select(User).where(User.donation_opt_in.is_(True)).order_by(User.email)).scalars():
+        w.writerow([u.email, u.display_name, u.locale, u.donation_opt_in_at.isoformat() if u.donation_opt_in_at else "",
+                    u.created_at.isoformat(), u.last_login_at.isoformat() if u.last_login_at else ""])
+    audit(db, user, None, "admin.export_donation_optins", "user", user.id)
+    db.commit()
+    stamp = utcnow().strftime("%Y-%m-%d")
+    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": disposition(f"fiole-appel-aux-dons-{stamp}.csv")})
 
 
 @app.get("/api/health")

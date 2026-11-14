@@ -68,7 +68,8 @@ export default function Dashboard() {
             {projects.map((p) => (
               <Link key={p.id} to={p.url} className="project-card">
                 <div className="name">{p.name}</div>
-                <div className="small-text muted">{t("owner")} : {p.owner.display_name}</div>
+                <div className="small-text muted">{t("owner")} : {p.owner.display_name}
+                  {p.role && p.role !== "owner" && <> · <span className="badge">{p.role === "editor" ? (lang === "fr" ? "Éditeur" : "Editor") : (lang === "fr" ? "Lecteur" : "Viewer")}{p.via_link ? (lang === "fr" ? " · lien" : " · link") : ""}</span></>}</div>
                 <div className="small-text muted">
                   {scope === "recent" && p.last_opened_at ? date(p.last_opened_at) : `${t("updated")} ${date(p.updated_at)}`}
                 </div>

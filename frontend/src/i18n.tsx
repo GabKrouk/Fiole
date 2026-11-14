@@ -28,8 +28,8 @@ const D = {
   close: { fr: "Fermer", en: "Close" },
   noProjects: { fr: "Aucun projet pour l’instant. Créez-en un pour commencer.", en: "No projects yet. Create one to get started." },
   sharedEmpty: {
-    fr: "Le partage arrive dans la prochaine version. Les projets que d’autres partageront avec vous apparaîtront ici.",
-    en: "Sharing arrives in the next version. Projects others share with you will appear here.",
+    fr: "Aucun projet partagé avec vous pour l’instant. Quand quelqu’un vous ajoute à un projet (ou que vous ouvrez un lien de partage), il apparaît ici.",
+    en: "Nothing shared with you yet. When someone adds you to a project (or you open a share link), it appears here.",
   },
   recentEmpty: { fr: "Aucun projet ouvert récemment.", en: "No recently opened projects." },
   updated: { fr: "Modifié", en: "Updated" },

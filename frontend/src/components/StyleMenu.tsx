@@ -14,7 +14,9 @@ export interface FigureStyleItem {
   mine: boolean;
   owner: string | null;
   version: number;
+  shared_with?: { user_id: string; email: string; display_name: string }[];
 }
+interface Lists { mine: FigureStyleItem[]; shared: FigureStyleItem[]; public: FigureStyleItem[] }
 
 interface Props {
   cfg: Cfg;
@@ -28,11 +30,13 @@ interface Props {
 export default function StyleMenu({ cfg, set, canEdit, builtins, applyBuiltin }: Props) {
   const { lang } = useI18n();
   const T = (fr: string, en: string) => (lang === "fr" ? fr : en);
-  const [mine, setMine] = useState<FigureStyleItem[]>([]);
+  const [lists, setLists] = useState<Lists>({ mine: [], shared: [], public: [] });
+  const mine = lists.mine;
+  const all = [...lists.mine, ...lists.shared, ...lists.public];
   const [saveOpen, setSaveOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
 
-  const load = () => api.get<{ mine: FigureStyleItem[] }>("/api/styles").then((r) => setMine(r.mine)).catch(() => {});
+  const load = () => api.get<Lists>("/api/styles").then(setLists).catch(() => {});
   useEffect(() => { load(); }, []);
 
   return (
@@ -41,7 +45,7 @@ export default function StyleMenu({ cfg, set, canEdit, builtins, applyBuiltin }:
         onChange={(e) => {
           const v = e.target.value;
           if (v.startsWith("b:")) applyBuiltin(v.slice(2));
-          else if (v.startsWith("s:")) { const st = mine.find((x) => x.id === v.slice(2)); if (st) set(st.settings); }
+          else if (v.startsWith("s:")) { const st = all.find((x) => x.id === v.slice(2)); if (st) set(st.settings); }
           else if (v === "__save") setSaveOpen(true);
           else if (v === "__manage") setManageOpen(true);
         }}>
@@ -52,13 +56,19 @@ export default function StyleMenu({ cfg, set, canEdit, builtins, applyBuiltin }:
         {mine.length > 0 && <optgroup label={T("Mes styles", "My styles")}>
           {mine.map((s) => <option key={s.id} value={`s:${s.id}`}>★ {s.name}</option>)}
         </optgroup>}
+        {lists.shared.length > 0 && <optgroup label={T("Partagés avec moi", "Shared with me")}>
+          {lists.shared.map((s) => <option key={s.id} value={`s:${s.id}`}>👥 {s.name} — {s.owner}</option>)}
+        </optgroup>}
+        {lists.public.length > 0 && <optgroup label={T("Galerie publique", "Public gallery")}>
+          {lists.public.slice(0, 30).map((s) => <option key={s.id} value={`s:${s.id}`}>🌐 {s.name} — {s.owner}</option>)}
+        </optgroup>}
         <optgroup label="—">
           <option value="__save">💾 {T("Enregistrer le style de cette figure…", "Save this figure’s style…")}</option>
-          <option value="__manage">⚙ {T("Gérer mes styles…", "Manage my styles…")}</option>
+          <option value="__manage">⚙ {T("Gérer et partager mes styles…", "Manage and share my styles…")}</option>
         </optgroup>
       </select>
       {saveOpen && <SaveStyle cfg={cfg} onClose={() => setSaveOpen(false)} onSaved={() => { setSaveOpen(false); load(); }} />}
-      {manageOpen && <ManageStyles mine={mine} canEdit={canEdit} reload={load} apply={(s) => { set(s.settings); setManageOpen(false); }} onClose={() => setManageOpen(false)} />}
+      {manageOpen && <ManageStyles lists={lists} canEdit={canEdit} reload={load} apply={(s) => { set(s.settings); setManageOpen(false); }} onClose={() => setManageOpen(false)} />}
     </>
   );
 }
@@ -90,12 +100,19 @@ function SaveStyle({ cfg, onClose, onSaved }: { cfg: Cfg; onClose: () => void; o
   );
 }
 
-function ManageStyles({ mine, canEdit, reload, apply, onClose }: { mine: FigureStyleItem[]; canEdit: boolean; reload: () => void; apply: (s: FigureStyleItem) => void; onClose: () => void }) {
+function ManageStyles({ lists, canEdit, reload, apply, onClose }: { lists: Lists; canEdit: boolean; reload: () => void; apply: (s: FigureStyleItem) => void; onClose: () => void }) {
   const { lang } = useI18n();
   const T = (fr: string, en: string) => (lang === "fr" ? fr : en);
   const [err, setErr] = useState("");
   const [names, setNames] = useState<Record<string, string>>({});
   const file = useRef<HTMLInputElement>(null);
+  const mine = lists.mine;
+  const [tab, setTab] = useState<"mine" | "others">("mine");
+  const [shareFor, setShareFor] = useState<string | null>(null);
+  const [info, setInfo] = useState("");
+  async function copy(s: FigureStyleItem) {
+    try { await api.post(`/api/styles/${s.id}/copy`); reload(); setInfo(T(`« ${s.name} » copié dans vos styles.`, `“${s.name}” copied into your styles.`)); setTab("mine"); } catch (e) { fail(e); }
+  }
   const fail = (e: unknown) => setErr(e instanceof ApiError ? (e.detail?.message?.[lang] ?? JSON.stringify(e.detail)) : String(e));
 
   async function rename(s: FigureStyleItem) {
@@ -116,28 +133,84 @@ function ManageStyles({ mine, canEdit, reload, apply, onClose }: { mine: FigureS
     } catch (e) { fail(e instanceof SyntaxError ? T("Fichier illisible.", "Unreadable file.") : e); }
   }
   return (
-    <Modal title={T("Mes styles de figure", "My figure styles")} onClose={onClose}
+    <Modal title={T("Styles de figure", "Figure styles")} onClose={onClose}
       footer={<>
         <input ref={file} type="file" accept=".json,application/json" style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && importFile(e.target.files[0])} />
         <button onClick={() => file.current?.click()}>⤒ {T("Importer un style (.fiole-style.json)", "Import a style (.fiole-style.json)")}</button>
         <button className="primary" onClick={onClose}>{T("Fermer", "Close")}</button></>}>
-      {mine.length === 0 && <div className="empty">{T("Aucun style enregistré. Ouvrez une figure qui vous plaît, puis « Style rapide » → « Enregistrer le style de cette figure… ».", "No saved style yet. Open a figure you like, then “Quick style” → “Save this figure’s style…”.")}</div>}
-      {mine.map((s) => (
-        <div key={s.id} className="style-row">
+      <div className="tabs" role="tablist" style={{ marginTop: -6 }}>
+        <button role="tab" aria-selected={tab === "mine"} className={tab === "mine" ? "active" : ""} onClick={() => setTab("mine")}>{T("Mes styles", "My styles")} ({mine.length})</button>
+        <button role="tab" aria-selected={tab === "others"} className={tab === "others" ? "active" : ""} onClick={() => setTab("others")}>{T("Partagés avec moi et galerie", "Shared with me & gallery")} ({lists.shared.length + lists.public.length})</button>
+      </div>
+      {info && <div className="notice info">{info}</div>}
+      {tab === "others" && <>
+        {lists.shared.length + lists.public.length === 0 && <div className="empty">{T("Personne n’a encore partagé de style avec vous, et la galerie publique est vide.", "Nobody has shared a style with you yet, and the public gallery is empty.")}</div>}
+        {[...lists.shared.map((s) => [s, "👥"] as const), ...lists.public.map((s) => [s, "🌐"] as const)].map(([s, icon]) => (
+          <div key={s.id} className="style-row">
+            <span className="grow"><b>{icon} {s.name}</b> <span className="muted small-text">{T("par", "by")} {s.owner}</span></span>
+            <span className="style-chips" aria-hidden>{Object.entries(s.settings).slice(0, 3).map(([k, v]) => <span key={k} className="badge">{k.replace(/_pt$/, "").replace(/_/g, " ")}: {Array.isArray(v) || typeof v === "object" ? "…" : String(v)}</span>)}</span>
+            <button className="small primary" disabled={!canEdit} onClick={() => apply(s)}>{T("Appliquer", "Apply")}</button>
+            <button className="small" onClick={() => copy(s)}>{T("Copier dans mes styles", "Copy into my styles")}</button>
+          </div>))}
+      </>}
+      {tab === "mine" && mine.length === 0 && <div className="empty">{T("Aucun style enregistré. Ouvrez une figure qui vous plaît, puis « Style rapide » → « Enregistrer le style de cette figure… ».", "No saved style yet. Open a figure you like, then “Quick style” → “Save this figure’s style…”.")}</div>}
+      {tab === "mine" && mine.map((s) => (
+        <div key={s.id}>
+        <div className="style-row">
           <input className="grow" value={names[s.id] ?? s.name} aria-label={T("Nom", "Name")} onChange={(e) => setNames({ ...names, [s.id]: e.target.value })}
             onBlur={() => rename(s)} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
           <span className="style-chips" aria-hidden>{Object.entries(s.settings).slice(0, 4).map(([k, v]) => <span key={k} className="badge">{k.replace(/_pt$/, "").replace(/_/g, " ")}: {Array.isArray(v) ? "…" : String(v)}</span>)}</span>
           <button className="small primary" disabled={!canEdit} onClick={() => apply(s)}>{T("Appliquer", "Apply")}</button>
           <a className="btn small" href={`/api/styles/${s.id}/export`}>{T("Exporter", "Export")}</a>
-          <button className="small" disabled title={T("Bientôt disponible", "Coming soon")}>{T("Partager", "Share")} <span className="badge soon">{T("Bientôt", "Soon")}</span></button>
+          <button className={`small ${shareFor === s.id ? "primary" : ""}`} onClick={() => setShareFor(shareFor === s.id ? null : s.id)}>
+            {s.visibility === "public" ? "🌐" : s.visibility === "shared" ? "👥" : "🔒"} {T("Partager", "Share")}</button>
           <button className="small danger" onClick={() => del(s)}>{T("Supprimer", "Delete")}</button>
         </div>
+        {shareFor === s.id && <StyleShare s={s} reload={reload} fail={fail} />}
+        </div>
       ))}
-      <div className="notice info" style={{ marginTop: 12 }}>
-        {T("Bientôt disponible : partager vos styles avec d’autres utilisateurs, parcourir les styles publics et les copier dans les vôtres. En attendant, exportez un style en fichier et envoyez-le.",
-          "Coming soon: share your styles with other users, browse public styles and copy them into yours. Meanwhile, export a style as a file and send it.")}
-      </div>
       {err && <div className="notice error">{err}</div>}
     </Modal>
+  );
+}
+
+function StyleShare({ s, reload, fail }: { s: FigureStyleItem; reload: () => void; fail: (e: unknown) => void }) {
+  const { lang } = useI18n();
+  const T = (fr: string, en: string) => (lang === "fr" ? fr : en);
+  const [emails, setEmails] = useState("");
+  const [msg, setMsg] = useState("");
+  const setVis = async (v: string) => { try { await api.put(`/api/styles/${s.id}`, { visibility: v, version: s.version }); reload(); } catch (e) { fail(e); } };
+  async function add() {
+    const list = emails.split(/[\s,;]+/).filter(Boolean);
+    if (!list.length) return;
+    try {
+      const r = await api.post<{ unknown: string[]; email: Record<string, string> }>(`/api/styles/${s.id}/shares`, { emails: list });
+      setEmails("");
+      setMsg(r.unknown.length ? T(`Pas de compte Fiole pour : ${r.unknown.join(", ")}. Demandez-leur de s’inscrire, ou envoyez le fichier exporté.`,
+        `No Fiole account for: ${r.unknown.join(", ")}. Ask them to sign up, or send the exported file.`) : T("Partagé.", "Shared."));
+      reload();
+    } catch (e) { fail(e); }
+  }
+  return (
+    <div className="style-share">
+      <div className="seg" role="radiogroup" aria-label={T("Visibilité", "Visibility")}>
+        {([["private", T("🔒 Privé", "🔒 Private")], ["shared", T("👥 Personnes choisies", "👥 Chosen people")], ["public", T("🌐 Public (galerie)", "🌐 Public (gallery)")]] as const).map(([v, l]) => (
+          <label key={v} className={s.visibility === v ? "on" : ""}><input type="radio" name={`vis-${s.id}`} checked={s.visibility === v} onChange={() => setVis(v)} /> {l}</label>))}
+      </div>
+      <p className="small-text muted" style={{ margin: "6px 0" }}>{s.visibility === "public"
+        ? T("Tous les utilisateurs de Fiole voient ce style dans la galerie et peuvent l’appliquer ou le copier. Ils ne peuvent pas modifier le vôtre.", "Every Fiole user sees this style in the gallery and can apply or copy it. They cannot change yours.")
+        : s.visibility === "shared" ? T("Seules les personnes ci-dessous le voient (« Partagés avec moi »). Elles peuvent l’appliquer ou le copier, pas modifier le vôtre.", "Only the people below see it (“Shared with me”). They can apply or copy it, not change yours.")
+        : T("Vous seul le voyez.", "Only you can see it.")}</p>
+      <div className="row">
+        <input className="grow" placeholder={T("Partager avec (emails)", "Share with (emails)")} value={emails} onChange={(e) => setEmails(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+        <button className="small primary" onClick={add} disabled={!emails.trim()}>{T("Partager", "Share")}</button>
+      </div>
+      {msg && <div className="small-text" style={{ marginTop: 4 }}>{msg}</div>}
+      {(s.shared_with ?? []).map((u) => (
+        <div key={u.user_id} className="row" style={{ marginTop: 4 }}>
+          <span className="grow small-text">👤 {u.display_name} <span className="muted">{u.email}</span></span>
+          <button className="ghost small" onClick={async () => { try { await api.del(`/api/styles/${s.id}/shares/${u.user_id}`); reload(); } catch (e) { fail(e); } }}>{T("Retirer", "Remove")}</button>
+        </div>))}
+    </div>
   );
 }

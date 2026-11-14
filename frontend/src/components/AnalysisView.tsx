@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { countRun } from "../usage";
 import { useNavigate, useParams } from "react-router-dom";
 import { Analysis, api, ApiError, Dataset, TableContent } from "../api";
 import { useI18n } from "../i18n";
@@ -104,6 +105,7 @@ export default function AnalysisView({ ctx }: { ctx: ProjectCtx }) {
       const saved = await api.put<Analysis>(`/api/projects/${pid}/analyses/${a!.id}`, { name: a!.name, config: a!.config, version: versionRef.current });
       versionRef.current = saved.version;
       const r = await api.post<Analysis>(`/api/projects/${pid}/analyses/${a!.id}/run`);
+      countRun(a!.kind);
       versionRef.current = r.version;
       setA(r);
       await ctx.reload();

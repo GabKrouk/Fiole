@@ -6,6 +6,9 @@ export interface User {
   email: string;
   display_name: string;
   locale: "fr" | "en";
+  donation_opt_in: boolean | null;
+  donation_opt_in_at: string | null;
+  is_admin: boolean;
 }
 
 export interface ProjectSummary {
@@ -14,6 +17,7 @@ export interface ProjectSummary {
   description: string;
   owner: { id: string; display_name: string; email: string };
   role: string | null;
+  via_link?: boolean;
   version: number;
   created_at: string;
   updated_at: string;

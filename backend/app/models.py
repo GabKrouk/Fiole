@@ -62,6 +62,21 @@ class User(Base):
     email_verified: Mapped[bool] = mapped_column(default=False)
     locale: Mapped[str] = mapped_column(String(5), default="fr")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    # Every account is recorded (email + last sign-in). The yearly donation appeal goes ONLY to people who
+    # opted in: None = never asked, True/False = their answer, with the date it was given (GDPR consent record).
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    login_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    donation_opt_in: Mapped[bool | None] = mapped_column(nullable=True)
+    donation_opt_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# Columns added after the first deployment: create_all() does not alter existing tables, so they are added here.
+ADDED_COLUMNS = [
+    ("users", "last_login_at", "TIMESTAMP WITH TIME ZONE"),
+    ("users", "login_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "donation_opt_in", "BOOLEAN"),
+    ("users", "donation_opt_in_at", "TIMESTAMP WITH TIME ZONE"),
+]
 
 
 class AuthSession(Base):
@@ -231,3 +246,46 @@ class FigureStyleShare(Base):
     style_id: Mapped[str] = mapped_column(ForeignKey("figure_styles.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ProjectInvite(Base):
+    """Sharing with an email that has no account yet: becomes a membership when that person signs up."""
+
+    __tablename__ = "project_invites"
+    __table_args__ = (UniqueConstraint("project_id", "email"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    email: Mapped[str] = mapped_column(String(320), index=True)
+    role: Mapped[Role] = mapped_column(Enum(Role, name="project_role"))
+    invited_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AccessRequest(Base):
+    """'Request access' from someone who opened a link to a project they cannot see."""
+
+    __tablename__ = "access_requests"
+    __table_args__ = (UniqueConstraint("project_id", "user_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    role: Mapped[Role] = mapped_column(Enum(Role, name="project_role"), default=Role.viewer)
+    message: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending | approved | denied
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    user: Mapped[User] = relationship(foreign_keys=[user_id])
+
+
+class ProjectLinkVisit(Base):
+    """A signed-in non-member who opened a project through 'anyone with the link': lists it in 'Shared with me'
+    while link access stays on, without making them a member."""
+
+    __tablename__ = "project_link_visits"
+    __table_args__ = (UniqueConstraint("project_id", "user_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    last_opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

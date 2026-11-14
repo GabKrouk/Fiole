@@ -6,6 +6,7 @@ import { useI18n } from "./i18n";
 import AuthPage from "./pages/AuthPage";
 import Dashboard from "./pages/Dashboard";
 import ProjectPage from "./pages/ProjectPage";
+import { AccountDialog, AdminPage, ConsentBanner } from "./components/Account";
 
 interface AuthCtx {
   user: User | null;
@@ -42,7 +43,9 @@ export function TopBar({ children, right }: { children?: React.ReactNode; right?
   const { user, setUser } = useAuth();
   const { t, lang, setLang } = useI18n();
   const nav = useNavigate();
+  const [account, setAccount] = useState(false);
   return (
+    <>
     <header className="topbar">
       <Link to="/" className="brand">
         <Logo /> Fiole
@@ -60,7 +63,7 @@ export function TopBar({ children, right }: { children?: React.ReactNode; right?
       </button>
       {user && (
         <>
-          <span className="muted small-text">{user.display_name}</span>
+          <button className="ghost small" title={lang === "fr" ? "Mon compte" : "My account"} onClick={() => setAccount(true)}>👤 {user.display_name}</button>
           <button className="small" onClick={async () => {
             await api.post("/api/auth/logout").catch(() => {});
             setUser(null);
@@ -71,6 +74,9 @@ export function TopBar({ children, right }: { children?: React.ReactNode; right?
         </>
       )}
     </header>
+    <ConsentBanner />
+    {account && <AccountDialog onClose={() => setAccount(false)} />}
+    </>
   );
 }
 
@@ -101,7 +107,8 @@ export default function App() {
       <Routes>
         <Route path="/login" element={user ? <Navigate to="/" /> : <AuthPage />} />
         <Route path="/" element={user ? <Dashboard /> : <Navigate to="/login" />} />
-        <Route path="/p/:projectId/*" element={user ? <ProjectPage /> : <Navigate to="/login" state={{ from: location.pathname }} />} />
+        <Route path="/p/:projectId/*" element={user ? <ProjectPage /> : <Navigate to="/login" state={{ from: location.pathname + location.search }} />} />
+        <Route path="/admin" element={user ? <AdminPage /> : <Navigate to="/login" state={{ from: "/admin" }} />} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </AuthContext.Provider>

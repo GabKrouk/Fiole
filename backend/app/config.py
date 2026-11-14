@@ -12,3 +12,5 @@ SESSION_COOKIE = "fiole_session"
 SESSION_DAYS = int(os.environ.get("FIOLE_SESSION_DAYS", "30"))
 COOKIE_SECURE = os.environ.get("FIOLE_COOKIE_SECURE", "0") == "1"
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+# Accounts allowed to see the admin page (user counts, CSV of donation-appeal opt-ins). Comma-separated.
+ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("FIOLE_ADMIN_EMAILS", "").split(",") if e.strip()}

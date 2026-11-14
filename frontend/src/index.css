@@ -366,3 +366,23 @@ a.side-item { text-decoration: none; }
 .style-row input { min-width: 160px; font-weight: 600; }
 .style-chips { display: flex; gap: 4px; flex-wrap: wrap; max-width: 320px; }
 .modal-foot { flex-wrap: wrap; }
+
+/* ---------- sharing ---------- */
+.avatar { width: 30px; height: 30px; border-radius: 50%; display: inline-grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex: none; }
+.share-h { margin: 16px 0 6px; font-size: 13px; color: var(--ink-2); }
+.share-list { display: flex; flex-direction: column; gap: 2px; }
+.share-person { display: flex; align-items: center; gap: 10px; padding: 6px 4px; border-radius: 8px; }
+.share-person:hover { background: var(--surface-2); }
+.share-person .grow { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.share-person select { width: auto; }
+.share-person.request { background: var(--accent-soft); }
+.share-add textarea { margin-top: 4px; }
+.readonly-banner { margin: 0 0 10px; }
+.consent { align-items: flex-start; margin: 10px 0; }
+.consent-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 16px; background: var(--ok-soft); color: var(--ink); border-bottom: 1px solid var(--line); font-size: 13px; }
+.consent-banner > span { flex: 1 1 320px; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.stat { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; }
+.stat b { font-size: 26px; }
+.stat span { color: var(--ink-2); font-size: 12px; }
+.style-share { border-top: 1px solid var(--line); margin-top: 6px; padding: 8px 0 4px; }

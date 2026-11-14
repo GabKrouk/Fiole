@@ -143,14 +143,11 @@ def test_figure_styles_save_apply_export_import_and_privacy():
     assert st["settings"] == {"font_size_pt": 9, "line_width_pt": 1.25, "frame": "closed", "tick_direction": "in", "palette": "tol_bright",
                               "p_format": "exact", "star_thresholds": [0.05, 0.01, 0.001, 0.0001]}
     lst = c.get("/api/styles").json()
-    assert [s["name"] for s in lst["mine"]] == ["Style de Gab"] and lst["sharing_available"] is False
+    assert [s["name"] for s in lst["mine"]] == ["Style de Gab"] and lst["sharing_available"] is True
     # rename with optimistic version; stale version -> 409
     r = c.put(f"/api/styles/{st['id']}", json={"name": "Gab 2", "version": st["version"]})
     assert r.status_code == 200 and r.json()["name"] == "Gab 2"
     assert c.put(f"/api/styles/{st['id']}", json={"name": "x", "version": st["version"]}).status_code == 409
-    # sharing is not available yet
-    r = c.put(f"/api/styles/{st['id']}", json={"visibility": "public", "version": r.json()["version"]})
-    assert r.status_code == 400 and r.json()["detail"]["code"] == "sharing_not_available"
     # export / import round trip
     r = c.get(f"/api/styles/{st['id']}/export")
     assert r.status_code == 200 and ".fiole-style.json" in r.headers["content-disposition"]

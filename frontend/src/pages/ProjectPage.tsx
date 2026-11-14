@@ -8,7 +8,8 @@ import DataView from "../components/DataView";
 import AnalysisView from "../components/AnalysisView";
 import FigureView from "../components/FigureView";
 import ImportDialog from "../components/ImportDialog";
-import Modal from "../components/Modal";
+import ShareDialog from "../components/ShareDialog";
+import NoAccess from "../components/NoAccess";
 import { BUILD } from "../theme";
 
 export interface ProjectCtx {
@@ -31,8 +32,7 @@ export default function ProjectPage() {
   const [types, setTypes] = useState<AnalysisType[]>([]);
   const [notFound, setNotFound] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
-  const [shareOpen, setShareOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [shareOpen, setShareOpen] = useState(() => new URLSearchParams(window.location.search).has("share"));
   const [name, setName] = useState("");
 
   const reload = useCallback(async () => {
@@ -50,7 +50,7 @@ export default function ProjectPage() {
     api.get<AnalysisType[]>("/api/analysis-types").then(setTypes);
   }, [reload]);
 
-  if (notFound) return (<><TopBar /><div className="page"><div className="empty">404</div></div></>);
+  if (notFound) return <NoAccess projectId={projectId!} />;
   if (!project) return <TopBar />;
 
   const base = `/p/${project.id}`;
@@ -116,11 +116,14 @@ export default function ProjectPage() {
     nav(`${base}/figure/${f.id}`);
   }
 
-  const projectUrl = `${window.location.origin}${base}`;
+  const myRole = project.role ?? "viewer";
+  const roleName = (r: string) => ({ owner: t("owner"), editor: lang === "fr" ? "Éditeur" : "Editor", viewer: lang === "fr" ? "Lecteur" : "Viewer" } as Record<string, string>)[r] ?? r;
 
   return (
     <>
-      <TopBar right={<button className="primary" onClick={() => setShareOpen(true)}>{t("share")}</button>}>
+      <TopBar right={<>
+        {myRole !== "owner" && <span className={`badge ${canEdit ? "ok" : ""}`} title={`${t("owner")} : ${project.owner.display_name}`}>{roleName(myRole)}{project.via_link ? (lang === "fr" ? " · via le lien" : " · via link") : ""}</span>}
+        <button className="primary" onClick={() => setShareOpen(true)}>🔒 {t("share")}</button></>}>
         <input className="name-input" value={name} onChange={(e) => setName(e.target.value)} onBlur={rename}
           onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} aria-label={t("projectName")} disabled={!canEdit} />
         <nav className="nav-tabs" aria-label={t("projectName")}>
@@ -183,6 +186,9 @@ export default function ProjectPage() {
           <div className="build-stamp" title="build">fiole · {BUILD}</div>
         </nav>
         <main className="main">
+          {!canEdit && <div className="notice info readonly-banner">👁 {lang === "fr"
+            ? `Lecture seule : ${project.owner.display_name} vous a donné un accès lecteur. Vous pouvez consulter et exporter, pas modifier.`
+            : `Read-only: ${project.owner.display_name} gave you viewer access. You can view and export, not edit.`}</div>}
           <Routes>
             <Route path="data/:datasetId" element={<DataView ctx={ctx} />} />
             <Route path="analysis/:analysisId" element={<AnalysisView ctx={ctx} />} />
@@ -199,21 +205,7 @@ export default function ProjectPage() {
         </main>
       </div>
       {importOpen && <ImportDialog projectId={project.id} onClose={() => setImportOpen(false)} onCreated={async (id) => { setImportOpen(false); await reload(); nav(`${base}/data/${id}`); }} />}
-      {shareOpen && (
-        <Modal title={`${t("share")} « ${project.name} »`} onClose={() => setShareOpen(false)} narrow>
-          <div className="notice info">{t("shareSoon")}</div>
-          <div className="field"><span>{t("owner")}</span><div>{project.owner.display_name} ({project.owner.email})</div></div>
-          <div className="row">
-            <input className="grow mono" readOnly value={projectUrl} aria-label="URL" />
-            <button onClick={() => { navigator.clipboard?.writeText(projectUrl); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>
-              {copied ? t("copied") : t("copyLink")}
-            </button>
-          </div>
-          <p className="small-text muted" style={{ marginTop: 10 }}>
-            {t("comingSoon")} : {["Ajouter des personnes / Add people", "Rôles / Roles", "Accès général / General access"].join(" · ")}
-          </p>
-        </Modal>
-      )}
+      {shareOpen && <ShareDialog projectId={project.id} projectName={project.name} onClose={() => { setShareOpen(false); if (loc.search.includes("share")) nav(loc.pathname, { replace: true }); }} onLeft={() => nav("/")} />}
     </>
   );
 }

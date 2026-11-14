@@ -75,6 +75,16 @@ Configuration (environment variables): `FIOLE_DATABASE_URL`
 (default `postgresql+psycopg2://app:app@localhost:5432/statsapp`),
 `FIOLE_COOKIE_SECURE=1` behind HTTPS, `FIOLE_FRONTEND_DIST`.
 
+### Sharing, emails, admin (optional settings)
+
+| variable | what it does |
+|---|---|
+| `FIOLE_ADMIN_EMAILS` | comma-separated accounts that see the admin page (`/admin`): counts and the CSV of people who opted in to the yearly donation appeal |
+| `FIOLE_USAGE_KEY` | the `ADMIN_KEY` of the [tools-usage](https://github.com/GabKrouk/tools-usage) dashboard: each sign-in reports the account email there (server to server). Unset = nothing sent |
+| `FIOLE_USAGE_ENDPOINT` | the tools-usage Apps Script URL (defaults to the one in `tools-usage/usage.js`) |
+| `FIOLE_MAIL_FROM` + one of `FIOLE_BREVO_API_KEY`, `FIOLE_RESEND_API_KEY`, `FIOLE_SMTP_HOST` (`_PORT`, `_USER`, `_PASSWORD`) | sharing notifications by email. Unset = no email is sent, and the app says so |
+| `FIOLE_PUBLIC_URL` | address used in email links (default: the request's address) |
+
 ## Tests
 
 ```bash
