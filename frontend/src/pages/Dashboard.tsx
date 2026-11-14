@@ -128,6 +128,12 @@ export default function Dashboard() {
                 <div className="small-text muted">
                   {scope === "recent" && p.last_opened_at ? date(p.last_opened_at) : `${t("updated")} ${date(p.updated_at)}`}
                 </div>
+                {p.role === "owner" && <button className="small card-delete" onClick={async (e) => {
+                  e.preventDefault(); e.stopPropagation();
+                  await api.del(`/api/projects/${p.id}`);
+                  refresh();
+                  showToast(T(`« ${p.name} » est dans la corbeille.`, `“${p.name}” moved to the trash.`), async () => { await api.post(`/api/projects/${p.id}/restore`); refresh(); });
+                }}>🗑 {T("Supprimer", "Delete")}</button>}
               </Link>
             ))}
           </div>
