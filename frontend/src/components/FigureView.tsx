@@ -8,6 +8,8 @@ import { factorColumns, levels, numericColumns } from "../columns";
 import FigureCanvas, { Selection } from "./FigureCanvas";
 import RichInput from "./RichText";
 import StyleMenu from "./StyleMenu";
+import ResizeBox from "./ResizeBox";
+import Modal from "./Modal";
 import Inspector, { figurePFormat, PFormat, StarThresholds } from "./Inspector";
 import type { Analysis } from "../api";
 
@@ -63,6 +65,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   const [selected, setSelected] = useState<Selection | null>(null);
   const [starsBusy, setStarsBusy] = useState(false);
   const [multiYState, setMultiY] = useState<boolean | null>(null);
+  const [perVarOpen, setPerVarOpen] = useState(false);
   const [starsOpts, setStarsOpts] = useState<{ mode: string; control: string; test: string; correction: string }>({ mode: "all", control: "", test: "welch", correction: "holm" });
   const undoStack = useRef<Cfg[]>([]);
   const redoStack = useRef<Cfg[]>([]);
@@ -270,6 +273,20 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     });
   }
 
+  async function duplicate(columns?: string[]) {
+    // save pending edits first, so the copy is exactly what is on screen
+    window.clearTimeout(saveTimer.current);
+    saveChain.current = saveChain.current.then(flushSave);
+    await saveChain.current;
+    try {
+      const made = await api.post<FigureEntity[]>(`/api/projects/${pid}/figures/${fig!.id}/duplicate`, columns ? { columns } : {});
+      await ctx.reload();
+      if (made.length) nav(`/p/${pid}/figure/${made[0].id}`);
+    } catch (e) {
+      setRenderErr(e instanceof ApiError ? (e.detail?.message ? L(e.detail.message) : JSON.stringify(e.detail)) : String(e));
+    }
+  }
+
   async function autoStars() {
     setStarsBusy(true);
     try {
@@ -330,6 +347,9 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
         {canEdit && <>
           <button className="small" onClick={undo} disabled={!undoStack.current.length} title="Ctrl/Cmd+Z">↶ {lang === "fr" ? "Annuler" : "Undo"}</button>
           <button className="small" onClick={redo} disabled={!redoStack.current.length} title="Ctrl/Cmd+Shift+Z">↷ {lang === "fr" ? "Rétablir" : "Redo"}</button>
+          <button className="small" title={lang === "fr" ? "Copie identique (Cmd/Ctrl+C puis Cmd/Ctrl+V marche aussi)" : "Identical copy (Cmd/Ctrl+C then Cmd/Ctrl+V works too)"}
+            onClick={() => duplicate()}>⧉ {lang === "fr" ? "Dupliquer" : "Duplicate"}</button>
+          <button className="small" onClick={() => setPerVarOpen(true)}>▦ {lang === "fr" ? "Une figure par variable…" : "One figure per variable…"}</button>
           <StyleMenu cfg={cfg} set={set} canEdit={canEdit} builtins={Object.entries(PRESETS).map(([k, p]) => [k, p.label[lang === "fr" ? 0 : 1]])}
             applyBuiltin={(k) => set(PRESETS[k].cfg(Number(cfg.width_mm) || 80, Number(cfg.height_mm) || 70))} />
         </>}
@@ -340,6 +360,8 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
           nav(`/p/${pid}`);
         }}>{t("delete")}</button>}
       </div>
+      {perVarOpen && <PerVariable cols={(GROUP_TYPES.includes(cfg.type ?? "scatter_groups") ? numericCols.filter((c) => c.id !== cfg.value_col) : yChoices.filter((c) => !yList.includes(c.id)))}
+        lang={lang} onClose={() => setPerVarOpen(false)} onGo={async (cols) => { await duplicate(cols); setPerVarOpen(false); }} />}
       <div className="fig-layout">
         <div className="fig-controls">
           <details open>
@@ -633,8 +655,10 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
             <button className="small" onClick={() => window.location.reload()}>{lang === "fr" ? "Recharger la figure" : "Reload figure"}</button></div>}
           <div className="fig-canvas">
             {svg ? (
-              <FigureCanvas svg={svg} widthMm={w} zoom={zoom} selected={selected} canEdit={canEdit} rowLabel={rowLabel}
-                onSelect={setSelected} onDrag={onDrag} onInlineEdit={onInlineEdit} />
+              <ResizeBox widthMm={w} heightMm={h} disabled={!canEdit} onResize={(W, H) => set({ width_mm: W, height_mm: H })}>
+                <FigureCanvas svg={svg} widthMm={w} zoom={zoom} selected={selected} canEdit={canEdit} rowLabel={rowLabel}
+                  onSelect={setSelected} onDrag={onDrag} onInlineEdit={onInlineEdit} />
+              </ResizeBox>
             ) : !renderErr && <span className="muted small-text">…</span>}
           </div>
           <div className="row" style={{ marginTop: 8 }}>
@@ -649,5 +673,28 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
         </div>
       </div>
     </>
+  );
+}
+
+function PerVariable({ cols, lang, onClose, onGo }: { cols: { id: string; name: string }[]; lang: string; onClose: () => void; onGo: (cols: string[]) => Promise<void> }) {
+  const T = (fr: string, en: string) => (lang === "fr" ? fr : en);
+  const [pick, setPick] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  return (
+    <Modal title={T("Une figure par variable", "One figure per variable")} onClose={onClose} narrow
+      footer={<><button onClick={onClose}>{T("Annuler", "Cancel")}</button>
+        <button className="primary" disabled={!pick.length || busy} onClick={async () => { setBusy(true); try { await onGo(pick); } finally { setBusy(false); } }}>
+          {busy ? "…" : T(`Créer ${pick.length || ""} figure${pick.length > 1 ? "s" : ""}`, `Create ${pick.length || ""} figure${pick.length > 1 ? "s" : ""}`)}</button></>}>
+      <p className="small-text muted" style={{ marginTop: 0 }}>{T(
+        "Chaque copie garde le style, la taille, les groupes et les textes de cette figure, et montre une autre variable en Y. L’échelle Y repart en automatique et les étoiles sont recalculées pour chaque variable.",
+        "Each copy keeps this figure's style, size, groups and texts, and shows another Y variable. The Y scale goes back to automatic and the stars are recomputed for each variable.")}</p>
+      <div className="row tight" style={{ marginBottom: 6 }}>
+        <button className="ghost small" onClick={() => setPick(cols.map((c) => c.id))}>{T("Tout cocher", "Select all")}</button>
+        <button className="ghost small" onClick={() => setPick([])}>{T("Tout décocher", "Clear")}</button>
+      </div>
+      {cols.map((c) => <label key={c.id} className="check"><input type="checkbox" checked={pick.includes(c.id)}
+        onChange={(e) => setPick(e.target.checked ? [...pick, c.id] : pick.filter((x) => x !== c.id))} /> {c.name}</label>)}
+      {!cols.length && <div className="empty">{T("Aucune autre colonne numérique.", "No other numeric column.")}</div>}
+    </Modal>
   );
 }

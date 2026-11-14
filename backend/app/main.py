@@ -21,6 +21,7 @@ from .authz import LINK_ROLE, Action, allowed_actions, effective_role, require
 from .config import COOKIE_SECURE, MAX_UPLOAD_BYTES, SESSION_COOKIE, SESSION_DAYS
 from .db import Base, engine, get_db
 from .figures.render import FigureError, render_figure, to_pdf, to_png
+from .figures import layout as layout_lib
 from .models import (
     Analysis,
     AnalysisResult,
@@ -28,6 +29,7 @@ from .models import (
     Dataset,
     DatasetVersion,
     Figure,
+    Layout,
     Project,
     ProjectMember,
     RawUpload,
@@ -302,6 +304,7 @@ def get_project(project_id: str, user: User = Depends(current_user), db: Session
         "datasets": [_dataset_meta(d) for d in datasets],
         "analyses": a_out,
         "figures": [_figure_out(db, f, by_id) for f in figures],
+        "layouts": [_layout_out(x) for x in db.execute(select(Layout).where(Layout.project_id == p.id).order_by(Layout.created_at)).scalars()],
     }
 
 
@@ -845,6 +848,234 @@ def export_figure(
     return Response(to_png(out["svg"], dpi), media_type="image/png", headers=headers)
 
 
+# ------------------------------------------------------------------ duplicate figures (one per variable)
+
+Y_KEYS = ("y_min", "y_max", "y_tick_step", "y_scale", "y_label", "y_unit")
+GROUP_TYPES = ("scatter_groups", "bar", "box", "violin")
+
+
+class DuplicateIn(BaseModel):
+    name: str | None = Field(default=None, max_length=300)
+    columns: list[str] | None = None  # one copy per Y column (stars recomputed for each); None = a plain copy
+
+
+def _y_key(cfg: dict) -> str:
+    if (cfg.get("type") or "scatter_groups") in GROUP_TYPES:
+        return str(cfg.get("value_col") or "")
+    y = cfg.get("y") or []
+    return "+".join(y) if isinstance(y, list) else str(y)
+
+
+def _retarget(db: Session, user: User, p: Project, src: Figure, cfg: dict, col: str, colname: str) -> dict:
+    """Copy of `cfg` showing column `col` on Y: axis settings and stars of that variable (saved, or recomputed)."""
+    import copy
+
+    cfg = copy.deepcopy(cfg)
+    anns = cfg.get("annotations") or []
+    old_k = _y_key(cfg)
+    per = dict(cfg.get("per_y") or {})
+    per[old_k] = {**{k: cfg.get(k) for k in Y_KEYS}, "annotations": [a for a in anns if a.get("type") == "pvalue"]}
+    if (cfg.get("type") or "scatter_groups") in GROUP_TYPES:
+        cfg["value_col"] = col
+    else:
+        cfg["y"] = [col]
+    new_k = _y_key(cfg)
+    saved = per.get(new_k)
+    for k in Y_KEYS:
+        cfg[k] = saved.get(k) if saved else None
+    keep = [a for a in anns if a.get("type") != "pvalue"]
+    if saved and saved.get("annotations"):
+        stars = saved["annotations"]
+    else:
+        # recompute each linked significance analysis on the new variable
+        stars = []
+        done: dict[str, str] = {}
+        for a in anns:
+            if a.get("type") != "pvalue" or not a.get("analysis_id"):
+                continue
+            aid = a["analysis_id"]
+            if aid not in done:
+                an = db.get(Analysis, aid)
+                if an is None or an.project_id != p.id or "value_col" not in (an.config or {}):
+                    continue
+                if an.config.get("value_col") == col:
+                    done[aid] = aid
+                else:
+                    base = re.sub(r"\s+–\s+[^–]+$", "", an.name)
+                    na = Analysis(project_id=p.id, dataset_id=an.dataset_id, name=f"{base} – {colname}"[:300], kind=an.kind,
+                                  config={**an.config, "value_col": col})
+                    db.add(na)
+                    db.flush()
+                    d = db.get(Dataset, na.dataset_id)
+                    res = run_analysis(na.kind, d.content, na.config)
+                    res["dataset"] = {"id": d.id, "name": d.name, "version": d.version}
+                    db.add(AnalysisResult(analysis_id=na.id, analysis_version=na.version, dataset_version=d.version, result=res,
+                                          engine_version=ENGINE, created_by=user.id))
+                    done[aid] = na.id
+            stars.append({**a, "analysis_id": done[aid]})
+    cfg["annotations"] = keep + stars
+    cfg["per_y"] = per
+    return cfg
+
+
+@app.post("/api/projects/{project_id}/figures/{figure_id}/duplicate")
+def duplicate_figure(project_id: str, figure_id: str, body: DuplicateIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    import copy
+
+    p = require(db, user, project_id, Action.EDIT)
+    src = _get_figure(db, project_id, figure_id)
+    fr = user.locale == "fr"
+    made: list[Figure] = []
+    if not body.columns:
+        name = (body.name or "").strip() or (f"{src.name} (copie)" if fr else f"{src.name} (copy)")
+        made.append(Figure(project_id=p.id, dataset_id=src.dataset_id, name=name[:300], kind=src.kind, config=copy.deepcopy(src.config)))
+    else:
+        d = _get_dataset(db, project_id, src.dataset_id)
+        names = {c["id"]: c["name"] for c in d.content.get("columns", [])}
+        base = re.sub(r"\s+–\s+[^–]+$", "", src.name)
+        for col in body.columns[:30]:
+            if col not in names:
+                raise HTTPException(422, detail={"code": "unknown_column", "message": {"fr": f"Colonne inconnue : {col}", "en": f"Unknown column: {col}"}})
+            cfg = _retarget(db, user, p, src, src.config or {}, col, names[col])
+            made.append(Figure(project_id=p.id, dataset_id=src.dataset_id, name=f"{base} – {names[col]}"[:300], kind=src.kind, config=cfg))
+    for f in made:
+        db.add(f)
+        db.flush()
+        audit(db, user, p.id, "figure.duplicate", "figure", f.id, source=src.id)
+    touch(p)
+    db.commit()
+    return [_figure_out(db, f, {}) for f in made]
+
+
+# ------------------------------------------------------------------ layouts (multi-panel pages)
+
+
+class LayoutIn(BaseModel):
+    name: str = Field(min_length=1, max_length=300)
+    config: dict = {}
+
+
+class LayoutUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=300)
+    config: dict | None = None
+    version: int
+
+
+def _layout_out(lay: Layout) -> dict:
+    return {"id": lay.id, "name": lay.name, "config": layout_lib.merged(lay.config), "version": lay.version, "updated_at": lay.updated_at.isoformat()}
+
+
+def _get_layout(db: Session, project_id: str, layout_id: str) -> Layout:
+    lay = db.get(Layout, layout_id)
+    if lay is None or lay.project_id != project_id:
+        raise HTTPException(404, detail={"code": "layout_not_found"})
+    return lay
+
+
+def _clean_layout_cfg(db: Session, project_id: str, cfg: dict) -> dict:
+    cfg = layout_lib.merged(cfg)
+    n = cfg["rows"] * cfg["cols"]
+    panels, seen = [], set()
+    for pnl in cfg.get("panels") or []:
+        try:
+            cell = int(pnl.get("cell"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        fid = pnl.get("figure_id")
+        if 0 <= cell < n and cell not in seen and fid and (f := db.get(Figure, fid)) is not None and f.project_id == project_id:
+            panels.append({"cell": cell, "figure_id": fid})
+            seen.add(cell)
+    cfg["panels"] = sorted(panels, key=lambda x: x["cell"])
+    return cfg
+
+
+def _render_layout(db: Session, project_id: str, cfg: dict, lang: str) -> dict:
+    cfg = _clean_layout_cfg(db, project_id, cfg)
+    by_cell = {pnl["cell"]: pnl["figure_id"] for pnl in cfg["panels"]}
+    placed, warnings = [], []
+    for c in layout_lib.cells(cfg):
+        fid = by_cell.get(c["index"])
+        if not fid:
+            placed.append({"cell": c, "svg": None})
+            continue
+        f = db.get(Figure, fid)
+        fcfg = {**(f.config or {}), "width_mm": round(c["w"], 2), "height_mm": round(c["h"], 2)}
+        if cfg["background"] == "transparent":
+            fcfg["background"] = "transparent"
+        try:
+            out = render_figure(_get_dataset(db, project_id, f.dataset_id).content, fcfg, _results_for(db, project_id, fcfg), lang)
+            placed.append({"cell": c, "svg": out["svg"]})
+            warnings += [{"en": f"{f.name}: {w['en']}", "fr": f"{f.name} : {w['fr']}"} for w in out["warnings"]]
+        except Exception as e:  # one broken panel never blanks the page
+            msg = getattr(e, "message", None) or {"en": str(e), "fr": str(e)}
+            placed.append({"cell": c, "svg": None})
+            warnings.append({"en": f"{f.name}: {msg['en']}", "fr": f"{f.name} : {msg['fr']}"})
+    return {"svg": layout_lib.compose(cfg, placed), "warnings": warnings, "cells": layout_lib.cells(cfg), "config": cfg}
+
+
+@app.post("/api/projects/{project_id}/layouts")
+def create_layout(project_id: str, body: LayoutIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    p = require(db, user, project_id, Action.EDIT)
+    lay = Layout(project_id=p.id, name=body.name.strip(), config=_clean_layout_cfg(db, project_id, body.config))
+    db.add(lay)
+    db.flush()
+    audit(db, user, p.id, "layout.create", "layout", lay.id)
+    touch(p)
+    db.commit()
+    return _layout_out(lay)
+
+
+@app.put("/api/projects/{project_id}/layouts/{layout_id}")
+def update_layout(project_id: str, layout_id: str, body: LayoutUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    p = require(db, user, project_id, Action.EDIT)
+    lay = _get_layout(db, project_id, layout_id)
+    if body.version != lay.version:
+        conflict("layout", lay.version)
+    if body.name is not None:
+        lay.name = body.name.strip()
+    if body.config is not None:
+        lay.config = _clean_layout_cfg(db, project_id, body.config)
+    lay.version += 1
+    lay.updated_at = utcnow()
+    touch(p)
+    db.commit()
+    return _layout_out(lay)
+
+
+@app.delete("/api/projects/{project_id}/layouts/{layout_id}")
+def delete_layout(project_id: str, layout_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    p = require(db, user, project_id, Action.EDIT)
+    db.delete(_get_layout(db, project_id, layout_id))
+    audit(db, user, p.id, "layout.delete", "layout", layout_id)
+    db.commit()
+    return {"ok": True}
+
+
+class LayoutRenderIn(BaseModel):
+    config: dict
+    lang: Literal["en", "fr"] = "en"
+
+
+@app.post("/api/projects/{project_id}/layouts/render")
+def render_layout_preview(project_id: str, body: LayoutRenderIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    require(db, user, project_id, Action.VIEW)
+    return _render_layout(db, project_id, body.config, body.lang)
+
+
+@app.get("/api/projects/{project_id}/layouts/{layout_id}/export")
+def export_layout(project_id: str, layout_id: str, format: Literal["svg", "pdf", "png"] = "pdf", dpi: int = 300,
+                  lang: Literal["en", "fr"] = "en", user: User = Depends(current_user), db: Session = Depends(get_db)):
+    require(db, user, project_id, Action.EXPORT)
+    lay = _get_layout(db, project_id, layout_id)
+    svg = _render_layout(db, project_id, lay.config, lang)["svg"]
+    headers = {"Content-Disposition": disposition(_safe(lay.name) + f".{format}")}
+    if format == "svg":
+        return Response(svg, media_type="image/svg+xml", headers=headers)
+    if format == "pdf":
+        return Response(to_pdf(svg), media_type="application/pdf", headers=headers)
+    return Response(to_png(svg, max(72, min(dpi, 1200))), media_type="image/png", headers=headers)
+
+
 # ------------------------------------------------------------------ figure styles (per user; sharing in phase 2)
 
 
@@ -1056,6 +1287,7 @@ def export_archive(project_id: str, user: User = Depends(current_user), db: Sess
             for a in analyses
         ],
         "figures": [{"id": f.id, "dataset_id": f.dataset_id, "name": f.name, "config": f.config} for f in figures],
+        "layouts": [{"name": x.name, "config": x.config} for x in db.execute(select(Layout).where(Layout.project_id == p.id)).scalars()],
     }
     return Response(json.dumps(doc, ensure_ascii=False, indent=1), media_type="application/json",
                     headers={"Content-Disposition": disposition(_safe(p.name) + f".fiole.json")})
@@ -1073,7 +1305,7 @@ async def import_archive(file: UploadFile = File(...), user: User = Depends(curr
     db.add(p)
     db.flush()
     db.add(ProjectMember(project_id=p.id, user_id=user.id, role=Role.owner, added_by=user.id, last_opened_at=utcnow()))
-    ds_map, a_map = {}, {}
+    ds_map, a_map, f_map = {}, {}, {}
     for d in doc.get("datasets", []):
         nd = Dataset(project_id=p.id, name=d["name"], content=validate_content(d["content"]), updated_by=user.id)
         db.add(nd)
@@ -1094,7 +1326,14 @@ async def import_archive(file: UploadFile = File(...), user: User = Depends(curr
         for ann in cfg.get("annotations") or []:
             if ann.get("analysis_id") in a_map:
                 ann["analysis_id"] = a_map[ann["analysis_id"]]
-        db.add(Figure(project_id=p.id, dataset_id=ds_map[f["dataset_id"]], name=f["name"], kind=cfg.get("type", "scatter_groups"), config=cfg))
+        nf = Figure(project_id=p.id, dataset_id=ds_map[f["dataset_id"]], name=f["name"], kind=cfg.get("type", "scatter_groups"), config=cfg)
+        db.add(nf)
+        db.flush()
+        f_map[f.get("id")] = nf.id
+    for lay in doc.get("layouts", []):
+        lc = dict(lay.get("config") or {})
+        lc["panels"] = [{**pn, "figure_id": f_map[pn.get("figure_id")]} for pn in lc.get("panels") or [] if pn.get("figure_id") in f_map]
+        db.add(Layout(project_id=p.id, name=lay.get("name") or "Layout", config=layout_lib.merged(lc)))
     audit(db, user, p.id, "project.import_archive", "project", p.id)
     db.commit()
     # Results are recomputed rather than trusted from the file.

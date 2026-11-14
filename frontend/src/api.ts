@@ -135,7 +135,16 @@ export interface FigureEntity {
   linked_analyses: string[];
 }
 
+export interface LayoutEntity {
+  id: string;
+  name: string;
+  config: Record<string, any>;
+  version: number;
+  updated_at: string;
+}
+
 export interface ProjectFull extends ProjectSummary {
+  layouts: LayoutEntity[];
   permissions: string[];
   datasets: DatasetMeta[];
   analyses: Analysis[];

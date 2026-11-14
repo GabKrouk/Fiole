@@ -284,3 +284,16 @@ class ProjectLinkVisit(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     last_opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Layout(Base):
+    """A multi-panel page: a grid in mm with one figure per cell (config: see figures/layout.py)."""
+
+    __tablename__ = "layouts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(300))
+    config: Mapped[dict] = mapped_column(JSONType)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

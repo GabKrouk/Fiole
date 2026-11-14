@@ -166,3 +166,78 @@ def test_figure_styles_save_apply_export_import_and_privacy():
     assert other.delete(f"/api/styles/{st['id']}").status_code == 404
     assert c.delete(f"/api/styles/{st['id']}").status_code == 200
     assert len(c.get("/api/styles").json()["mine"]) == 2
+
+
+def test_duplicate_per_variable_and_layout_export():
+    c = client("panels@example.org")
+    pid = c.post("/api/projects", json={"name": "Panels"}).json()["id"]
+    rows = [{"id": f"r{i}", "cells": {"g": "Col" if i % 2 else "mut", "a": 5 + i % 4 + (i % 2) * 2, "b": 20 - i % 3 - (i % 2) * 4, "n": 1 + i * 0.1}} for i in range(16)]
+    content = {"columns": [{"id": "g", "name": "Genotype", "type": "text"}, {"id": "a", "name": "N%", "type": "numeric"},
+                           {"id": "b", "name": "C%", "type": "numeric"}, {"id": "n", "name": "Dry weight", "type": "numeric"}],
+               "rows": rows, "design": {"layout": "wide", "group_columns": []}}
+    did = c.post(f"/api/projects/{pid}/datasets", json={"name": "T", "content": content}).json()["id"]
+    an = c.post(f"/api/projects/{pid}/analyses", json={"dataset_id": did, "kind": "pairwise", "name": "Étoiles – Fig – N%",
+                                                       "config": {"group_col": "g", "value_col": "a", "mode": "all", "test": "welch", "correction": "holm"}}).json()
+    c.post(f"/api/projects/{pid}/analyses/{an['id']}/run")
+    fig = c.post(f"/api/projects/{pid}/figures", json={"dataset_id": did, "name": "Fig – N%", "config": {
+        "type": "box", "group_col": "g", "value_col": "a", "y_min": 0, "y_max": 12, "frame": "closed",
+        "annotations": [{"type": "pvalue", "analysis_id": an["id"], "all": True}, {"type": "text", "text": "note"}]}}).json()
+
+    # plain copy: everything identical, same analyses
+    cp = c.post(f"/api/projects/{pid}/figures/{fig['id']}/duplicate", json={}).json()
+    assert len(cp) == 1 and cp[0]["name"] == "Fig – N% (copie)" and cp[0]["config"] == fig["config"]
+
+    # one figure per variable: style kept, axis range reset, stars recomputed on that variable
+    out = c.post(f"/api/projects/{pid}/figures/{fig['id']}/duplicate", json={"columns": ["b", "n"]}).json()
+    assert [f["name"] for f in out] == ["Fig – C%", "Fig – Dry weight"]
+    fb = out[0]["config"]
+    assert fb["value_col"] == "b" and fb["frame"] == "closed" and fb["y_min"] is None and fb["y_max"] is None
+    star = [a for a in fb["annotations"] if a["type"] == "pvalue"][0]
+    assert star["analysis_id"] != an["id"]
+    assert any(a["type"] == "text" for a in fb["annotations"])
+    proj = c.get(f"/api/projects/{pid}").json()
+    new_an = [a for a in proj["analyses"] if a["id"] == star["analysis_id"]][0]
+    assert new_an["config"]["value_col"] == "b" and new_an["status"] == "up_to_date" and new_an["name"] == "Étoiles – Fig – C%"
+    assert not [f for f in proj["figures"] if f["id"] == out[0]["id"]][0]["stale"]
+    # back to the original variable restores its saved axis range
+    back = c.post(f"/api/projects/{pid}/figures/{out[0]['id']}/duplicate", json={"columns": ["a"]}).json()[0]["config"]
+    assert back["y_max"] == 12 and [a for a in back["annotations"] if a["type"] == "pvalue"][0]["analysis_id"] == an["id"]
+    assert c.post(f"/api/projects/{pid}/figures/{fig['id']}/duplicate", json={"columns": ["zz"]}).status_code == 422
+
+    # layout: 2 x 2 page, three panels, letters A B C, exports
+    lay = c.post(f"/api/projects/{pid}/layouts", json={"name": "Figure 1", "config": {
+        "width_mm": 180, "height_mm": 140, "rows": 2, "cols": 2,
+        "panels": [{"cell": 0, "figure_id": fig["id"]}, {"cell": 1, "figure_id": out[0]["id"]}, {"cell": 3, "figure_id": out[1]["id"]},
+                   {"cell": 9, "figure_id": fig["id"]}, {"cell": 2, "figure_id": "nope"}]}}).json()
+    assert [p["cell"] for p in lay["config"]["panels"]] == [0, 1, 3]  # invalid cells / figures dropped
+    r = c.post(f"/api/projects/{pid}/layouts/render", json={"config": lay["config"]}).json()
+    svg = r["svg"]
+    assert svg.startswith("<svg") and 'width="180mm"' in svg
+    import re
+    assert re.findall(r'data-el="panel-label"[^>]*>([^<]+)<', svg) == ["A", "B", "C"]
+    assert len(set(re.findall(r'id="([^"]+)"', svg))) == len(re.findall(r'id="([^"]+)"', svg))  # ids unique
+    assert c.get(f"/api/projects/{pid}").json()["layouts"][0]["name"] == "Figure 1"
+    for fmt, ctype in (("svg", "image/svg+xml"), ("pdf", "application/pdf"), ("png", "image/png")):
+        e = c.get(f"/api/projects/{pid}/layouts/{lay['id']}/export?format={fmt}&dpi=150")
+        assert e.status_code == 200 and e.headers["content-type"].startswith(ctype), fmt
+    # unequal column widths, version conflict
+    u = c.put(f"/api/projects/{pid}/layouts/{lay['id']}", json={"config": {**lay["config"], "col_widths": [2, 1], "label_style": "(a)"}, "version": lay["version"]}).json()
+    assert u["config"]["col_widths"] == [2, 1]
+    assert c.put(f"/api/projects/{pid}/layouts/{lay['id']}", json={"name": "x", "version": lay["version"]}).status_code == 409
+    svg2 = c.post(f"/api/projects/{pid}/layouts/render", json={"config": u["config"]}).json()
+    assert re.findall(r'data-el="panel-label"[^>]*>([^<]+)<', svg2["svg"])[0] == "(a)"
+    assert abs(svg2["cells"][0]["w"] - 2 * svg2["cells"][1]["w"]) < 0.01
+    # a deleted figure leaves an empty cell
+    c.delete(f"/api/projects/{pid}/figures/{out[1]['id']}")
+    assert len(re.findall(r'data-el="panel-label"', c.post(f"/api/projects/{pid}/layouts/render", json={"config": u["config"]}).json()["svg"])) == 2
+    # archive round trip keeps the layout
+    arch = c.get(f"/api/projects/{pid}/archive").content
+    imp = c.post("/api/projects/import-archive", files={"file": ("p.fiole.json", arch, "application/json")}).json()
+    lays = c.get(f"/api/projects/{imp['id']}").json()["layouts"]
+    assert len(lays) == 1 and len(lays[0]["config"]["panels"]) == 2
+    # viewers cannot duplicate or edit layouts
+    v = client("panels-viewer@example.org")
+    c.post(f"/api/projects/{pid}/members", json={"emails": ["panels-viewer@example.org"], "role": "viewer", "notify": False})
+    assert v.post(f"/api/projects/{pid}/figures/{fig['id']}/duplicate", json={}).status_code == 403
+    assert v.post(f"/api/projects/{pid}/layouts", json={"name": "x"}).status_code == 403
+    assert v.get(f"/api/projects/{pid}/layouts/{lay['id']}/export?format=svg").status_code == 200

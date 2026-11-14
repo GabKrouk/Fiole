@@ -7,6 +7,7 @@ import { useI18n } from "../i18n";
 import DataView from "../components/DataView";
 import AnalysisView from "../components/AnalysisView";
 import FigureView from "../components/FigureView";
+import LayoutView from "../components/LayoutView";
 import ImportDialog from "../components/ImportDialog";
 import ShareDialog from "../components/ShareDialog";
 import NoAccess from "../components/NoAccess";
@@ -34,6 +35,8 @@ export default function ProjectPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(() => new URLSearchParams(window.location.search).has("share"));
   const [name, setName] = useState("");
+  const [toast, setToast] = useState("");
+  const flash = (m: string) => { setToast(m); window.setTimeout(() => setToast(""), 2200); };
 
   const reload = useCallback(async () => {
     try {
@@ -49,6 +52,36 @@ export default function ProjectPage() {
     reload();
     api.get<AnalysisType[]>("/api/analysis-types").then(setTypes);
   }, [reload]);
+
+  // Cmd/Ctrl+C on an open figure, then Cmd/Ctrl+V: duplicate it (like copy-pasting a graph in Prism)
+  useEffect(() => {
+    const h = async (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement;
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable) return;
+      if (!(e.metaKey || e.ctrlKey) || !project) return;
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) return; // the user is copying text
+      const k = e.key.toLowerCase();
+      const m = loc.pathname.match(/\/figure\/([^/]+)/);
+      if (k === "c" && m) {
+        try { sessionStorage.setItem("fiole-clip", JSON.stringify({ project: project.id, figure: m[1] })); } catch { /* ignore */ }
+        flash(lang === "fr" ? "Figure copiée. Cmd/Ctrl+V pour la coller (dupliquer)." : "Figure copied. Cmd/Ctrl+V to paste (duplicate).");
+      } else if (k === "v" && project.permissions.includes("edit")) {
+        let clip: { project: string; figure: string } | null = null;
+        try { clip = JSON.parse(sessionStorage.getItem("fiole-clip") || "null"); } catch { /* ignore */ }
+        if (!clip || clip.project !== project.id) return;
+        e.preventDefault();
+        try {
+          const made = await api.post<{ id: string }[]>(`/api/projects/${project.id}/figures/${clip.figure}/duplicate`, {});
+          await reload();
+          nav(`/p/${project.id}/figure/${made[0].id}`);
+          flash(lang === "fr" ? "Figure collée : changez ses variables à gauche." : "Figure pasted: change its variables on the left.");
+        } catch { flash(lang === "fr" ? "La figure copiée n’existe plus." : "The copied figure no longer exists."); }
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [project, loc.pathname, lang, reload, nav]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (notFound) return <NoAccess projectId={projectId!} />;
   if (!project) return <TopBar />;
@@ -116,6 +149,18 @@ export default function ProjectPage() {
     nav(`${base}/figure/${f.id}`);
   }
 
+  async function newLayout() {
+    const figs = project!.figures.slice(-4).map((f) => f.id);
+    const cols = figs.length <= 1 ? 1 : 2;
+    const rows = figs.length > 2 ? 2 : 1;
+    const l = await api.post<{ id: string }>(`/api/projects/${project!.id}/layouts`, {
+      name: `${lang === "fr" ? "Mise en page" : "Layout"} ${project!.layouts.length + 1}`,
+      config: { width_mm: cols === 1 ? 85 : 180, height_mm: rows === 1 ? (cols === 1 ? 75 : 80) : 150, rows, cols, panels: figs.map((f, i) => ({ cell: i, figure_id: f })) },
+    });
+    await reload();
+    nav(`${base}/layout/${l.id}`);
+  }
+
   const myRole = project.role ?? "viewer";
   const roleName = (r: string) => ({ owner: t("owner"), editor: lang === "fr" ? "Éditeur" : "Editor", viewer: lang === "fr" ? "Lecteur" : "Viewer" } as Record<string, string>)[r] ?? r;
 
@@ -168,6 +213,15 @@ export default function ProjectPage() {
             ))}
           </section>
           <section>
+            <h4>{lang === "fr" ? "Mises en page (panneaux A, B, C…)" : "Layouts (panels A, B, C…)"}{canEdit && project.figures.length > 0 && <button className="ghost small" title={lang === "fr" ? "Nouvelle mise en page" : "New layout"} onClick={newLayout}>+</button>}</h4>
+            {project.layouts.length === 0 && <p className="small-text muted" style={{ padding: "0 8px" }}>{project.figures.length ? (lang === "fr" ? "Assemblez plusieurs figures sur une page." : "Put several figures on one page.") : t("nothingYet")}</p>}
+            {project.layouts.map((l) => (
+              <button key={l.id} className={`side-item ${active.includes(l.id) ? "active" : ""}`} onClick={() => nav(`${base}/layout/${l.id}`)}>
+                <span className="label">▤ {l.name}</span><span className="muted small-text">{(l.config.panels ?? []).length}</span>
+              </button>
+            ))}
+          </section>
+          <section>
             <h4>{t("export")}</h4>
             <a className="side-item" href={`/api/projects/${project.id}/results.csv?lang=${lang}`}>{t("exportResults")}</a>
             <a className="side-item" href={`/api/projects/${project.id}/archive`}>{t("exportArchive")} (.fiole.json)</a>
@@ -177,7 +231,6 @@ export default function ProjectPage() {
             <h4>{t("unavailableTitle")}</h4>
             <div className="soon-list" style={{ padding: "0 6px" }}>
               {types.filter((x) => !x.available).map((x) => <span key={x.kind} className="badge soon" title={t("comingSoon")}>{L(x.label)}</span>)}
-              <span className="badge soon">{t("multiPanel")}</span>
               <span className="badge soon">{t("transformations")}</span>
               <span className="badge soon">{t("duplicate")}</span>
               <span className="badge soon">{t("comments")}</span>
@@ -193,6 +246,7 @@ export default function ProjectPage() {
             <Route path="data/:datasetId" element={<DataView ctx={ctx} />} />
             <Route path="analysis/:analysisId" element={<AnalysisView ctx={ctx} />} />
             <Route path="figure/:figureId" element={<FigureView ctx={ctx} />} />
+            <Route path="layout/:layoutId" element={<LayoutView key={loc.pathname} ctx={ctx} />} />
             <Route path="*" element={
               <div className="empty" style={{ marginTop: 20 }}>
                 <p>{project.datasets.length === 0 ? t("noData") : t("selectSomething")}</p>
@@ -204,6 +258,7 @@ export default function ProjectPage() {
           </Routes>
         </main>
       </div>
+      {toast && <div className="toast" role="status">{toast}</div>}
       {importOpen && <ImportDialog projectId={project.id} onClose={() => setImportOpen(false)} onCreated={async (id) => { setImportOpen(false); await reload(); nav(`${base}/data/${id}`); }} />}
       {shareOpen && <ShareDialog projectId={project.id} projectName={project.name} onClose={() => { setShareOpen(false); if (loc.search.includes("share")) nav(loc.pathname, { replace: true }); }} onLeft={() => nav("/")} />}
     </>
