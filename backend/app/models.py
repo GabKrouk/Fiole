@@ -195,3 +195,39 @@ class AuditEvent(Base):
     target_id: Mapped[str] = mapped_column(String(64), default="")
     detail: Mapped[dict] = mapped_column(JSONType, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class StyleVisibility(str, enum.Enum):
+    """Phase 1: only `private`. Phase 2: shared with chosen users, or public (browsable by everyone)."""
+
+    private = "private"
+    shared = "shared"
+    public = "public"
+
+
+class FigureStyle(Base):
+    """A named figure look (fonts, lines, ticks, colours, star display…), owned by a user, reusable on any figure.
+    Holds appearance only: never data, column choices or axis ranges."""
+
+    __tablename__ = "figure_styles"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    settings: Mapped[dict] = mapped_column(JSONType)
+    visibility: Mapped[StyleVisibility] = mapped_column(Enum(StyleVisibility, name="style_visibility"), default=StyleVisibility.private)
+    source_style_id: Mapped[str | None] = mapped_column(String(36), nullable=True)  # set when copied from someone's style
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class FigureStyleShare(Base):
+    """Phase 2: a style shared with a specific user (visibility = shared)."""
+
+    __tablename__ = "figure_style_shares"
+    __table_args__ = (UniqueConstraint("style_id", "user_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    style_id: Mapped[str] = mapped_column(ForeignKey("figure_styles.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

@@ -130,3 +130,42 @@ def test_bad_login():
     c2 = TestClient(app)
     assert c2.post("/api/auth/login", json={"email": "carol@example.org", "password": "wrong"}).status_code == 401
     assert c2.post("/api/auth/login", json={"email": "carol@example.org", "password": "correct horse"}).status_code == 200
+
+
+def test_figure_styles_save_apply_export_import_and_privacy():
+    c = client("styler@example.org")
+    cfg = {"type": "box", "group_col": "g", "value_col": "a", "y_min": 6, "y_max": 9, "title": "Mine", "annotations": [{"type": "pvalue"}],
+           "font_size_pt": 9, "line_width_pt": 1.25, "frame": "closed", "tick_direction": "in", "palette": "tol_bright", "p_format": "exact",
+           "star_thresholds": [0.05, 0.01, 0.001, 0.0001], "width_mm": 120}
+    st = c.post("/api/styles", json={"name": "Style de Gab", "from_config": cfg}).json()
+    assert st["name"] == "Style de Gab" and st["visibility"] == "private" and st["mine"]
+    # appearance only: no data, columns, axis ranges, titles, annotations or size
+    assert st["settings"] == {"font_size_pt": 9, "line_width_pt": 1.25, "frame": "closed", "tick_direction": "in", "palette": "tol_bright",
+                              "p_format": "exact", "star_thresholds": [0.05, 0.01, 0.001, 0.0001]}
+    lst = c.get("/api/styles").json()
+    assert [s["name"] for s in lst["mine"]] == ["Style de Gab"] and lst["sharing_available"] is False
+    # rename with optimistic version; stale version -> 409
+    r = c.put(f"/api/styles/{st['id']}", json={"name": "Gab 2", "version": st["version"]})
+    assert r.status_code == 200 and r.json()["name"] == "Gab 2"
+    assert c.put(f"/api/styles/{st['id']}", json={"name": "x", "version": st["version"]}).status_code == 409
+    # sharing is not available yet
+    r = c.put(f"/api/styles/{st['id']}", json={"visibility": "public", "version": r.json()["version"]})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "sharing_not_available"
+    # export / import round trip
+    r = c.get(f"/api/styles/{st['id']}/export")
+    assert r.status_code == 200 and ".fiole-style.json" in r.headers["content-disposition"]
+    f = r.json()
+    assert f["format"] == "fiole-style" and f["settings"]["frame"] == "closed"
+    imp = c.post("/api/styles/import", json=f).json()
+    assert imp["settings"] == st["settings"] and imp["id"] != st["id"]
+    assert c.post("/api/styles/import", json={"hello": 1}).status_code == 422
+    cp = c.post(f"/api/styles/{st['id']}/copy").json()
+    assert cp["source_style_id"] == st["id"] and "copie" in cp["name"]
+    # another user can neither see nor touch a private style
+    other = client("other-styler@example.org")
+    assert other.get("/api/styles").json()["mine"] == []
+    assert other.get(f"/api/styles/{st['id']}/export").status_code == 404
+    assert other.post(f"/api/styles/{st['id']}/copy").status_code == 404
+    assert other.delete(f"/api/styles/{st['id']}").status_code == 404
+    assert c.delete(f"/api/styles/{st['id']}").status_code == 200
+    assert len(c.get("/api/styles").json()["mine"]) == 2

@@ -362,3 +362,7 @@ table.grid thead th, table.grid .rowhead, .preview-table th { background: var(--
 .rt-editor sup, .rt-editor sub { font-size: 70%; line-height: 0; }
 .fig-inline .rich-input { background: var(--surface); }
 a.side-item { text-decoration: none; }
+.style-row { display: flex; gap: 6px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line-2); flex-wrap: wrap; }
+.style-row input { min-width: 160px; font-weight: 600; }
+.style-chips { display: flex; gap: 4px; flex-wrap: wrap; max-width: 320px; }
+.modal-foot { flex-wrap: wrap; }

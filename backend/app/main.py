@@ -31,9 +31,12 @@ from .models import (
     Project,
     ProjectMember,
     RawUpload,
+    FigureStyle,
     Role,
+    StyleVisibility,
     User,
 )
+from . import styles as style_lib
 from .stats import ENGINE, catalog, run_analysis
 
 @asynccontextmanager
@@ -794,6 +797,109 @@ def export_figure(
         return Response(to_pdf(out["svg"]), media_type="application/pdf", headers=headers)
     dpi = max(72, min(dpi, 1200))
     return Response(to_png(out["svg"], dpi), media_type="image/png", headers=headers)
+
+
+# ------------------------------------------------------------------ figure styles (per user; sharing in phase 2)
+
+
+class StyleIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = ""
+    settings: dict | None = None      # explicit settings, or
+    from_config: dict | None = None   # a figure configuration to take the look from
+
+
+class StyleUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+    settings: dict | None = None
+    visibility: Literal["private", "shared", "public"] | None = None
+    version: int
+
+
+def _get_style(db: Session, user: User, style_id: str, own: bool = False) -> FigureStyle:
+    st = db.get(FigureStyle, style_id)
+    if st is None or not style_lib.can_view(db, user, st) or (own and st.owner_id != user.id):
+        raise HTTPException(404, detail={"code": "style_not_found"})
+    return st
+
+
+def _new_style(db: Session, user: User, name: str, description: str, settings: dict, source: str | None = None) -> FigureStyle:
+    clean = style_lib.extract(settings or {})
+    if not clean:
+        raise HTTPException(422, detail={"code": "empty_style", "message": {"en": "This style has no appearance settings.", "fr": "Ce style ne contient aucun réglage d’apparence."}})
+    st = FigureStyle(owner_id=user.id, name=name.strip(), description=description, settings=clean, source_style_id=source)
+    db.add(st)
+    db.flush()
+    audit(db, user, None, "style.create", "style", st.id)
+    db.commit()
+    db.refresh(st)
+    return st
+
+
+@app.get("/api/styles")
+def list_styles(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    mine = db.execute(select(FigureStyle).where(FigureStyle.owner_id == user.id).order_by(FigureStyle.name)).scalars().all()
+    # Phase 2: styles shared with me and public styles of other users will be listed here.
+    return {"mine": [style_lib.style_out(st, user, user.display_name) for st in mine], "shared": [], "public": [], "sharing_available": False}
+
+
+@app.post("/api/styles")
+def create_style(body: StyleIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return style_lib.style_out(_new_style(db, user, body.name, body.description, body.settings or body.from_config or {}), user, user.display_name)
+
+
+@app.put("/api/styles/{style_id}")
+def update_style(style_id: str, body: StyleUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    st = _get_style(db, user, style_id, own=True)
+    if body.version != st.version:
+        conflict("style", st.version)
+    if body.visibility and body.visibility != "private":
+        raise HTTPException(400, detail={"code": "sharing_not_available", "message": {"en": "Sharing styles is coming soon.", "fr": "Le partage des styles arrive bientôt."}})
+    if body.name is not None:
+        st.name = body.name.strip()
+    if body.description is not None:
+        st.description = body.description
+    if body.settings is not None:
+        clean = style_lib.extract(body.settings)
+        if clean:
+            st.settings = clean
+    st.version += 1
+    st.updated_at = utcnow()
+    db.commit()
+    return style_lib.style_out(st, user, user.display_name)
+
+
+@app.delete("/api/styles/{style_id}")
+def delete_style(style_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    st = _get_style(db, user, style_id, own=True)
+    db.delete(st)
+    audit(db, user, None, "style.delete", "style", style_id)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/styles/{style_id}/copy")
+def copy_style(style_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Copy a style I can see (mine now; someone else's shared or public style in phase 2) into my styles."""
+    st = _get_style(db, user, style_id)
+    name = st.name if st.owner_id != user.id else (f"{st.name} (copie)" if user.locale == "fr" else f"{st.name} (copy)")
+    return style_lib.style_out(_new_style(db, user, name, st.description, st.settings, source=st.id), user, user.display_name)
+
+
+@app.get("/api/styles/{style_id}/export")
+def export_style(style_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    st = _get_style(db, user, style_id)
+    return Response(json.dumps(style_lib.to_file(st), ensure_ascii=False, indent=2), media_type="application/json",
+                    headers={"Content-Disposition": disposition(_safe(st.name) + ".fiole-style.json")})
+
+
+@app.post("/api/styles/import")
+def import_style(body: dict, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if body.get("format") != style_lib.FILE_FORMAT or not isinstance(body.get("settings"), dict):
+        raise HTTPException(422, detail={"code": "not_a_style_file", "message": {"en": "This is not a Fiole style file (.fiole-style.json).", "fr": "Ce fichier n’est pas un style Fiole (.fiole-style.json)."}})
+    name = str(body.get("name") or "Style")[:200]
+    return style_lib.style_out(_new_style(db, user, name, str(body.get("description") or ""), body["settings"]), user, user.display_name)
 
 
 # ------------------------------------------------------------------ archive

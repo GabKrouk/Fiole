@@ -7,6 +7,7 @@ import { groupNames, StepButtons } from "./AnalysisView";
 import { factorColumns, levels, numericColumns } from "../columns";
 import FigureCanvas, { Selection } from "./FigureCanvas";
 import RichInput from "./RichText";
+import StyleMenu from "./StyleMenu";
 import Inspector, { figurePFormat, PFormat, StarThresholds } from "./Inspector";
 import type { Analysis } from "../api";
 
@@ -325,10 +326,8 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
         {canEdit && <>
           <button className="small" onClick={undo} disabled={!undoStack.current.length} title="Ctrl/Cmd+Z">↶ {lang === "fr" ? "Annuler" : "Undo"}</button>
           <button className="small" onClick={redo} disabled={!redoStack.current.length} title="Ctrl/Cmd+Shift+Z">↷ {lang === "fr" ? "Rétablir" : "Redo"}</button>
-          <select className="small" value="" onChange={(e) => e.target.value && set(PRESETS[e.target.value].cfg(Number(cfg.width_mm) || 80, Number(cfg.height_mm) || 70))} aria-label="style" style={{ fontSize: 12, padding: "3px 6px" }}>
-            <option value="">{lang === "fr" ? "Style rapide…" : "Quick style…"}</option>
-            {Object.entries(PRESETS).map(([k, p]) => <option key={k} value={k}>{p.label[lang === "fr" ? 0 : 1]}</option>)}
-          </select>
+          <StyleMenu cfg={cfg} set={set} canEdit={canEdit} builtins={Object.entries(PRESETS).map(([k, p]) => [k, p.label[lang === "fr" ? 0 : 1]])}
+            applyBuiltin={(k) => set(PRESETS[k].cfg(Number(cfg.width_mm) || 80, Number(cfg.height_mm) || 70))} />
         </>}
         {canEdit && <button className="small danger" onClick={async () => {
           if (!window.confirm(t("confirmDelete"))) return;
