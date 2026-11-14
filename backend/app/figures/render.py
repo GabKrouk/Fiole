@@ -8,6 +8,7 @@ so font sizes and line widths in pt are exact at the final size.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
@@ -170,6 +171,19 @@ def text_width(s: str, size: float) -> float:
     return 0.55 * size * len(s)
 
 
+SUPERSCRIPT = str.maketrans("0123456789-−+=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁻⁺⁼⁽⁾")
+
+
+def superscript(s: str) -> str:
+    """Turn <sup>…</sup> into Unicode superscript characters."""
+    return re.sub(r"<sup>(.*?)</sup>", lambda m: m.group(1).translate(SUPERSCRIPT), s)
+
+
+def label_width(s: str, size: float) -> float:
+    m = re.fullmatch(r"(.*)<sup>(.*?)</sup>", s, flags=re.S)
+    return text_width(m.group(1), size) + text_width(m.group(2), size * 0.7) if m else text_width(s, size)
+
+
 def van_der_corput(i: int) -> float:
     v, denom = 0.0, 1.0
     i += 1
@@ -204,12 +218,20 @@ class SVG:
     def text(self, x, y, s, size=None, anchor="middle", weight="normal", rotate=None, baseline="auto", cls="", extra=""):
         size = size or self.cfg["font_size_pt"]
         tr = f' transform="rotate({rotate} {x:.2f} {y:.2f})"' if rotate is not None else ""
-        content = escape(s)
-        # Superscripts for tick labels (10<sup>3</sup>)
-        if "&lt;sup&gt;" in content:
-            content = content.replace("&lt;sup&gt;", f'<tspan baseline-shift="super" font-size="{size * 0.7:.2f}">').replace("&lt;/sup&gt;", "</tspan>")
         db = f' dominant-baseline="{baseline}"' if baseline != "auto" else ""
         c = f' class="{cls}"' if cls else ""
+        m = re.fullmatch(r"(.*)<sup>(.*?)</sup>", s, flags=re.S) if rotate is None else None
+        if m:
+            # Exponent (10<sup>−3</sup>) as a second text element joined exactly at one x: shifted <tspan>s are
+            # misplaced by CairoSVG (PDF/PNG export) and superscript glyphs are missing from common fonts.
+            base, exp = m.group(1), m.group(2)
+            esz = size * 0.7
+            wb, we = text_width(base, size), text_width(exp, esz)
+            x0 = x + (wb - we) / 2 if anchor == "middle" else (x - we if anchor == "end" else x + wb)
+            self.add(f'<text x="{x0:.2f}" y="{y:.2f}" font-size="{size:.2f}" text-anchor="end" font-weight="{weight}"{db}{c}{extra}>{escape(base)}</text>')
+            self.add(f'<text x="{x0 + size * 0.04:.2f}" y="{y - size * 0.4:.2f}" font-size="{esz:.2f}" text-anchor="start" font-weight="{weight}"{db}>{escape(exp)}</text>')
+            return
+        content = escape(superscript(s))
         self.add(
             f'<text x="{x:.2f}" y="{y:.2f}" font-size="{size:.2f}" text-anchor="{anchor}" font-weight="{weight}"{db}{tr}{c}{extra}>{content}</text>'
         )
@@ -435,7 +457,7 @@ def _frame(svg: SVG, cfg: dict, n_cats: int | None, xlabels: list[str] | None, y
     fs = cfg["font_size_pt"]
     lw = cfg["line_width_pt"]
     top = 4 + (cfg["title_size_pt"] * 1.6 if cfg["title"] else 0) + fs * 0.6 + extra_top
-    ytick_w = max((text_width(fmt_tick(v).split("<")[0], fs) for v in yticks), default=fs)
+    ytick_w = max((label_width(fmt_tick(v), fs) for v in yticks), default=fs)
     ylab = cfg["y_label"] + (f" ({cfg['y_unit']})" if cfg["y_unit"] else "")
     left = 3 + (fs * 1.4 if ylab else 0) + ytick_w + fs * 0.6 + 3
     # x labels: rotate if they do not fit
@@ -443,10 +465,13 @@ def _frame(svg: SVG, cfg: dict, n_cats: int | None, xlabels: list[str] | None, y
     rotate = False
     if xlabels is not None and n_cats:
         avail = (W - left - 6) / n_cats
-        widest = max((text_width(s, fs) for s in xlabels), default=0)
-        if widest > avail * 0.95:
+        ws = [text_width(s, fs) for s in xlabels]
+        widest = max(ws, default=0)
+        # rotate only when two neighbouring labels would actually touch (or one overflows the figure edge)
+        collide = any((ws[i] + ws[i + 1]) / 2 > avail - fs * 0.4 for i in range(len(ws) - 1)) or (ws and ws[-1] / 2 > avail / 2 + 4)
+        if collide:
             rotate = True
-            bottom_pad = fs * 0.8 + min(widest, H * 0.35) * 0.72 + fs
+            bottom_pad = max(tick_span(cfg)[0], 0) + 2 + min(widest, H * 0.4) * 0.71 + fs * 0.75 + 2
     xlab = cfg["x_label"] + (f" ({cfg['x_unit']})" if cfg.get("x_unit") else "")
     bottom = H - 3 - (fs * 1.5 if xlab else 0) - bottom_pad
     right = W - 6
@@ -454,6 +479,14 @@ def _frame(svg: SVG, cfg: dict, n_cats: int | None, xlabels: list[str] | None, y
         raise _err("The figure is too small for its text. Increase the size or reduce the font.", "La figure est trop petite pour son texte. Agrandissez-la ou réduisez la police.")
 
     ys = Scale(ylo, yhi, bottom, top, log)
+    # never let tick labels overlap: keep every k-th tick when the plot is short for the font
+    if not log and len(yticks) > 2:
+        step = abs(yticks[1] - yticks[0]) or 1.0
+        gap = abs(ys(yticks[0]) - ys(yticks[1]))
+        if gap < fs * 1.35:
+            k = 2 if gap * 2 >= fs * 1.35 else (5 if gap * 5 >= fs * 1.35 else 10)
+            thinned = [v for v in yticks if abs(round(v / step) % k) == 0]
+            yticks = thinned if len(thinned) >= 2 else [yticks[0], yticks[-1]]
     out, _inn = tick_span(cfg)
     # transparent plot area: clicking it selects the frame / axes settings
     svg.add(f'<rect data-el="plot" x="{left:.2f}" y="{top:.2f}" width="{right - left:.2f}" height="{bottom - top:.2f}" fill="#FFFFFF" fill-opacity="0"/>')
@@ -634,57 +667,77 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
             if label == "ns" and cfg.get("hide_ns"):
                 continue
             brackets.append((k, c, label))
-    # Stack brackets: short spans first, each on the lowest level where it does not overlap another.
-    placed: list[tuple[int, int, int]] = []  # (i1, i2, level)
-    layout = []
-    for k, c, label in sorted(brackets, key=lambda b: abs(names.index(b[1]["group1"]) - names.index(b[1]["group2"]))):
-        i1, i2 = sorted([names.index(c["group1"]), names.index(c["group2"])])
-        lvl = 0
-        while any(l == lvl and not (i2 < a1 or i1 > a2) for a1, a2, l in placed):
-            lvl += 1
-        placed.append((i1, i2, lvl))
-        layout.append((k, c, label, i1, i2, lvl))
-    n_levels = max((l for *_, l in layout), default=-1) + 1
     labels = [cfg["group_labels"].get(g.name, g.name) for g in sel]
     include_zero = cfg["type"] == "bar"
-    # Brackets are laid out in points above the highest data value. Reserve exactly that room inside the
-    # plot: extend the automatic Y range, or (fixed Y max / log scale) enlarge the top margin, so that
-    # brackets and stars never leave the figure or run into the title.
-    bracket_gap, level_h = 6.0, fs * 2.0
-    needed = (bracket_gap + (n_levels - 1) * level_h + 1.2 + fs * 0.9 + 2.0) if n_levels else 0.0
-    hi_target = hi
-    extra_top = 0.0
-    above_plot = False
-    ylo, yhi, yticks, log = _y_axis(cfg, lo, hi_target, include_zero=include_zero, warnings=[])
-    if n_levels:
-        auto_range = cfg["y_max"] is None and not log
-        _l, _r, ptop0, pbottom0, _ys0, _rot = _frame(SVG(svg.w, svg.h, cfg), cfg, len(sel), labels, ylo, yhi, yticks, log)
+    ylo, yhi, yticks, log = _y_axis(cfg, lo, hi, include_zero=include_zero, warnings=[])
+    # Brackets are laid out in points above the highest data value. Their whole stack gets a fixed budget
+    # (at most ~40 % of the plot height, so the data are never crushed): labels and spacing shrink to fit it.
+    # The room is then reserved by extending the automatic Y range, or, for a fixed Y max / log scale, by
+    # drawing the stack above the plot in an enlarged top margin. Never across the frame or the title.
+    hi_target, extra_top, above_plot = hi, 0.0, False
+    layout: list = []
+    label_fs, bracket_gap, level_h, needed = fs, 6.0, fs * 2.0, 0.0
+    exact = p_format == "exact"
+    if brackets:
+        l0, r0, ptop0, pbottom0, _ys0, _rot = _frame(SVG(svg.w, svg.h, cfg), cfg, len(sel), labels, ylo, yhi, yticks, log)
         hp0 = pbottom0 - ptop0
-        max_head = hp0 * 0.55
-        if needed > max_head:  # small figure / many brackets: tighten the stacking before giving up room
-            bracket_gap = 3.0
-            level_h = max(fs * 1.25, (max_head - bracket_gap - 1.2 - fs * 0.9 - 2.0) / max(n_levels - 1, 1))
-            needed = bracket_gap + (n_levels - 1) * level_h + 1.2 + fs * 0.9 + 2.0
-        max_extra = max(hp0 - 25.0, 0.0)
+        band0 = (r0 - l0) / len(sel)
+        budget = hp0 * 0.4
+
+        def stack(lfs: float) -> list:
+            placed, out = [], []  # placed: (x_from, x_to, level), label width included so labels never collide
+            for k, c, label in sorted(brackets, key=lambda b: abs(names.index(b[1]["group1"]) - names.index(b[1]["group2"]))):
+                i1, i2 = sorted([names.index(c["group1"]), names.index(c["group2"])])
+                x1, x2 = band0 * (i1 + 0.5) + 2, band0 * (i2 + 0.5) - 2
+                w = label_width(label, lfs) + lfs * 1.2
+                xa, xb = min(x1, (x1 + x2 - w) / 2), max(x2, (x1 + x2 + w) / 2)
+                lvl = 0
+                while any(l == lvl and not (xb < a_ - 1 or xa > b_ + 1) for a_, b_, l in placed):
+                    lvl += 1
+                placed.append((xa, xb, lvl))
+                out.append((k, c, label, i1, i2, lvl))
+            return out
+
+        def need(n: int, lfs: float, gap: float, lh: float) -> float:
+            return gap + (n - 1) * lh + 1.2 + lfs * (1.25 if exact else 0.9) + 2.0
+
+        lfs = fs
+        while True:
+            layout = stack(lfs)
+            n_levels = max(l for *_, l in layout) + 1
+            label_fs, bracket_gap = lfs, 6.0
+            level_h = lfs * (1.25 if exact else 0.9) + 1.2 + max(fs * 0.9, 6.0)
+            needed = need(n_levels, lfs, bracket_gap, level_h)
+            if needed > budget:  # tighten the spacing first
+                bracket_gap = 3.0
+                level_h = lfs * (1.25 if exact else 0.9) + 1.2 + 3.5
+                needed = need(n_levels, lfs, bracket_gap, level_h)
+            if needed <= budget or lfs <= max(5.0, fs * 0.55):
+                break
+            lfs = max(5.0, fs * 0.55, lfs * 0.9)  # then use smaller bracket labels
+        if needed > budget:  # last resort before overflowing: allow a taller stack (data keep ≥ 40 %)
+            budget = hp0 * 0.6
+            if needed > budget:
+                level_h = max((budget - bracket_gap - 3.2 - label_fs * (1.25 if exact else 0.9)) / max(n_levels - 1, 1), label_fs * 0.9)
+                needed = need(n_levels, label_fs, bracket_gap, level_h)
+        if needed > hp0 * 0.5:
+            warnings.append({"en": "The figure is too small to show every significance bracket clearly: enlarge it, reduce the font or hide “ns”.",
+                             "fr": "La figure est trop petite pour afficher clairement tous les crochets de significativité : agrandissez-la, réduisez la police ou masquez les « ns »."})
+        auto_range = cfg["y_max"] is None and not log
         for _ in range(12):
             _l, _r, ptop, pbottom, pys, _rot = _frame(SVG(svg.w, svg.h, cfg), cfg, len(sel), labels, ylo, yhi, yticks, log)
-            # the whole stack must fit between the highest value and the top of the plot, clear of the frame line
             inside_room = min(pys(hi), pbottom) - ptop if hi <= yhi else -1.0
             if inside_room >= needed + 2.0:
                 break
             hp = pbottom - ptop
-            if auto_range and needed < hp * 0.8:
+            if auto_range and needed + 2.0 < hp * 0.65:
                 # solve (yhi - hi) / (yhi - ylo) * hp >= needed + 2 for yhi, then let nice_range round it up
                 want = needed + 2.0
                 hi_target = max(hi_target, (hi * hp - want * ylo) / (hp - want)) + (hi - lo or 1.0) * 1e-3
                 ylo, yhi, yticks, log = _y_axis(cfg, lo, hi_target, include_zero=include_zero, warnings=[])
                 continue
-            # fixed Y range (or log scale): draw the whole stack above the plot, in an enlarged top margin
-            above_plot = True
-            extra_top = min(needed, max_extra)
-            if needed > max_extra:
-                warnings.append({"en": "The figure is too small to show every significance bracket clearly: enlarge it or hide “ns”.",
-                                 "fr": "La figure est trop petite pour afficher clairement tous les crochets de significativité : agrandissez-la ou masquez les « ns »."})
+            above_plot = True  # fixed Y range (or log scale): the stack goes above the plot
+            extra_top = max(0.0, min(needed + 2.0, hp0 * 0.6, hp0 - 22.0))
             break
     ylo, yhi, yticks, log = _y_axis(cfg, lo, hi_target, include_zero=include_zero, warnings=warnings)
     left, right, top, bottom, ys, rotate = _frame(svg, cfg, len(sel), labels, ylo, yhi, yticks, log, extra_top=extra_top)
@@ -778,7 +831,7 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
             f'<path d="M{x1 + 2:.2f},{ybase + tick:.2f} L{x1 + 2:.2f},{ybase:.2f} L{x2 - 2:.2f},{ybase:.2f} L{x2 - 2:.2f},{ybase + tick:.2f}" '
             f'fill="none" stroke="#000" stroke-width="{lw:.2f}" class="pvalue-bracket" data-analysis-id="{attr(all_ann[k].get("analysis_id", ""))}"/>'
         )
-        svg.text((x1 + x2) / 2, ybase - (1.2 if label.startswith("*") else 2.5), label, cls="pvalue-label")
+        svg.text((x1 + x2) / 2, ybase - (1.2 if label.startswith("*") else 2.0), label, size=label_fs, cls="pvalue-label")
         svg.close()
 
 

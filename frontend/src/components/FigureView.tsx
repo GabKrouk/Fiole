@@ -9,12 +9,19 @@ import FigureCanvas, { Selection } from "./FigureCanvas";
 import Inspector, { figurePFormat, PFormat, StarThresholds } from "./Inspector";
 import type { Analysis } from "../api";
 
-const PRESETS: Record<string, { label: [string, string]; cfg: Record<string, unknown> }> = {
-  prism: { label: ["Classique (type Prism)", "Classic (Prism-like)"], cfg: { font_family: "Arial", font_size_pt: 10, title_size_pt: 12, line_width_pt: 1, tick_direction: "out", tick_length_pt: 4, frame: "open", point_size_pt: 5, minor_ticks: 0 } },
-  journal: { label: ["Revue (Nature / Cell)", "Journal (Nature / Cell)"], cfg: { font_family: "Arial", font_size_pt: 7, title_size_pt: 8, line_width_pt: 0.5, tick_direction: "out", tick_length_pt: 2, frame: "open", point_size_pt: 3, minor_ticks: 0 } },
-  boxed: { label: ["Encadré, graduations internes", "Boxed, inside ticks"], cfg: { frame: "closed", tick_direction: "in", tick_length_pt: 3, minor_ticks: 1, line_width_pt: 0.75 } },
-  poster: { label: ["Poster / présentation", "Poster / slides"], cfg: { font_size_pt: 14, title_size_pt: 16, line_width_pt: 1.5, point_size_pt: 7, tick_length_pt: 5 } },
-  minimal: { label: ["Minimal", "Minimal"], cfg: { frame: "open", tick_direction: "out", tick_length_pt: 2, minor_ticks: 0, line_width_pt: 0.5, fill_opacity: 0.15, palette: "grayscale" } },
+// Quick styles. "Classic" and "Poster" scale text, lines and points with the figure size (reference 80 × 70 mm)
+// so that a style looks right on a small panel as on a full-width figure; journal styles keep absolute sizes.
+function scaled(w: number, h: number, cap: number, v: { font: number; title: number; lw: number; pt: number; tick: number }) {
+  const k = Math.min(cap, Math.max(0.8, Math.sqrt((w * h) / 5600)));
+  const r = (x: number, q = 0.5) => Math.round((x * k) / q) * q;
+  return { font_size_pt: r(v.font), title_size_pt: r(v.title), line_width_pt: r(v.lw, 0.25), point_size_pt: r(v.pt), tick_length_pt: r(v.tick) };
+}
+const PRESETS: Record<string, { label: [string, string]; cfg: (w: number, h: number) => Record<string, unknown> }> = {
+  prism: { label: ["Classique (type Prism)", "Classic (Prism-like)"], cfg: (w, h) => ({ font_family: "Arial", tick_direction: "out", frame: "open", minor_ticks: 0, palette: null, fill_opacity: 0.3, ...scaled(w, h, 1.3, { font: 10, title: 12, lw: 1, pt: 5, tick: 4 }) }) },
+  journal: { label: ["Revue (Nature / Cell)", "Journal (Nature / Cell)"], cfg: () => ({ font_family: "Arial", font_size_pt: 7, title_size_pt: 8, line_width_pt: 0.5, tick_direction: "out", tick_length_pt: 2, frame: "open", point_size_pt: 3, minor_ticks: 0, palette: null, fill_opacity: 0.3 }) },
+  boxed: { label: ["Encadré, graduations internes", "Boxed, inside ticks"], cfg: () => ({ frame: "closed", tick_direction: "in", tick_length_pt: 3, minor_ticks: 1, line_width_pt: 0.75 }) },
+  poster: { label: ["Poster / présentation", "Poster / slides"], cfg: (w, h) => ({ frame: "open", tick_direction: "out", minor_ticks: 0, ...scaled(w, h, 1.6, { font: 10, title: 12, lw: 1.5, pt: 6, tick: 4 }) }) },
+  minimal: { label: ["Minimal", "Minimal"], cfg: () => ({ frame: "open", tick_direction: "out", tick_length_pt: 2, minor_ticks: 0, line_width_pt: 0.5, fill_opacity: 0.15, palette: "grayscale" }) },
 };
 
 const PALETTES: Record<string, string[]> = {
@@ -295,7 +302,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
         {canEdit && <>
           <button className="small" onClick={undo} disabled={!undoStack.current.length} title="Ctrl/Cmd+Z">↶ {lang === "fr" ? "Annuler" : "Undo"}</button>
           <button className="small" onClick={redo} disabled={!redoStack.current.length} title="Ctrl/Cmd+Shift+Z">↷ {lang === "fr" ? "Rétablir" : "Redo"}</button>
-          <select className="small" value="" onChange={(e) => e.target.value && set(PRESETS[e.target.value].cfg)} aria-label="style" style={{ fontSize: 12, padding: "3px 6px" }}>
+          <select className="small" value="" onChange={(e) => e.target.value && set(PRESETS[e.target.value].cfg(Number(cfg.width_mm) || 80, Number(cfg.height_mm) || 70))} aria-label="style" style={{ fontSize: 12, padding: "3px 6px" }}>
             <option value="">{lang === "fr" ? "Style rapide…" : "Quick style…"}</option>
             {Object.entries(PRESETS).map(([k, p]) => <option key={k} value={k}>{p.label[lang === "fr" ? 0 : 1]}</option>)}
           </select>

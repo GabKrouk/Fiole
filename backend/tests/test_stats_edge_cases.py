@@ -240,3 +240,52 @@ def test_gab_scenario_one_bracket_per_pair_single_format_clear_of_frame(y_max):
     labels = re.findall(r'class="pvalue-label"[^>]*>([^<]*)<', out["svg"])
     assert labels and all(l.startswith("p ") for l in labels), labels
     assert "* p &lt; 0.05" not in out["caption"] and "* p < 0.05" not in out["caption"]
+
+
+STYLE_PRESETS = {  # mirrors the editor's quick styles (font sizes as applied at each size)
+    "prism": lambda k: {"font_size_pt": round(10 * k * 2) / 2, "title_size_pt": round(12 * k * 2) / 2, "line_width_pt": 1, "tick_length_pt": 4},
+    "journal": lambda k: {"font_size_pt": 7, "title_size_pt": 8, "line_width_pt": 0.5, "tick_length_pt": 2, "point_size_pt": 3},
+    "boxed": lambda k: {"frame": "closed", "tick_direction": "in", "minor_ticks": 1},
+    "poster": lambda k: {"font_size_pt": round(10 * k * 2) / 2, "title_size_pt": round(12 * k * 2) / 2, "line_width_pt": 1.5, "point_size_pt": 6},
+    "minimal": lambda k: {"palette": "grayscale", "fill_opacity": 0.15, "line_width_pt": 0.5},
+}
+
+
+@pytest.mark.parametrize("style", list(STYLE_PRESETS))
+@pytest.mark.parametrize("size", [(60, 50), (80, 70), (180, 100)])
+@pytest.mark.parametrize("fmt,fixed", [("stars", False), ("exact", True)])
+def test_quick_styles_render_cleanly_at_all_sizes(style, size, fmt, fixed):
+    import math
+    import re
+    from app.figures.render import render_figure
+    c = _four_groups()
+    res = run_analysis("pairwise", c, {"group_col": "g", "value_col": "a"})
+    w, h = size
+    k = min(1.6, max(0.8, math.sqrt(w * h / 5600)))
+    cfg = {"type": "box", "group_col": "g", "value_col": "a", "title": "Yo this is great", "show_points": True, "width_mm": w, "height_mm": h,
+           "p_format": fmt, "annotations": [{"type": "pvalue", "analysis_id": "A", "all": True}], **STYLE_PRESETS[style](k)}
+    if fixed:
+        cfg.update(y_min=6, y_max=9)
+    out = render_figure(c, cfg, results={"A": {"result": res, "stale": False}})
+    svg = out["svg"]
+    fs = cfg.get("font_size_pt", 8.0)
+    ts = cfg.get("title_size_pt", 9.0)
+    # brackets: below the title, inside the figure
+    ys = []
+    for g in re.findall(r'<g data-el="pvalue"[^>]*>(.*?)</g>', svg, flags=re.S):
+        ys += [float(v) for v in re.findall(r'[ML][\d.]+,([\d.]+)', g)]
+    assert ys and min(ys) > 4 + ts, (style, size, min(ys))
+    # the order of the groups never changes
+    labels = re.findall(r'<g data-el="group-label" data-group="([^"]+)"', svg)
+    assert labels == ["Col", "tga1", "tga4", "tga1tga4"]
+    # y tick labels never overlap
+    yax = re.search(r'<g data-el="y-axis">(.*?)</g>', svg, flags=re.S).group(1)
+    ty = sorted(float(v) for v in re.findall(r'<text[^>]* y="([\d.]+)"', yax))
+    assert all(b - a >= fs * 1.2 for a, b in zip(ty, ty[1:])), (style, size, ty)
+    # the data keep a real share of the figure: plot area >= 30 % of the figure height
+    plot_h = float(re.search(r'<rect data-el="plot" x="[\d.]+" y="[\d.]+" width="[\d.]+" height="([\d.]+)"', svg).group(1))
+    fig_h = h / 25.4 * 72
+    too_small = any("too small" in w["en"] for w in out["warnings"])
+    assert plot_h >= (0.2 if too_small else 0.3) * fig_h, (style, size, plot_h, fig_h)
+    if too_small:  # only on the smallest panel
+        assert size == (60, 50)
