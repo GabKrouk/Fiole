@@ -38,6 +38,16 @@ most values. Edge cases (n too small, zero variance, unmatched pairs,
 exclusions, technical replicates, p below 2.2e-16 never shown as 0) are in
 `test_stats_edge_cases.py`.
 
+## Put it online (Render, one click)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/GabKrouk/Fiole)
+
+The button reads `render.yaml`: it creates a web service (built from the
+`Dockerfile`) and a Postgres database, and connects them. Render's free tier
+sleeps after 15 minutes of inactivity (the first visit then takes ~1 minute) and
+the free database expires after 30 days; switch both to a paid plan
+(about $7/month each) to keep data permanently.
+
 ## Run locally
 
 Requirements: Python 3.11+, Node 18+, PostgreSQL 14+.
