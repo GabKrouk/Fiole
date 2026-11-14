@@ -1,4 +1,4 @@
-"""Reports each sign-in (the account email) to gab's tools-usage dashboard (github.com/GabKrouk/tools-usage),
+"""Reports each sign-in (the account email, and the tool: fiole, regine, genecloud…) to gab's tools-usage dashboard (github.com/GabKrouk/tools-usage),
 the Google Apps Script that already counts the use of his other tools.
 
   FIOLE_USAGE_KEY       the dashboard's ADMIN_KEY (required: nothing is sent without it)
@@ -33,13 +33,13 @@ def _post(payload: dict, endpoint: str) -> None:
         log.warning("tools-usage report failed: %s", str(e)[:200])
 
 
-def report_login(email: str, wait: bool = False) -> bool:
+def report_login(email: str, wait: bool = False, tool: str = "fiole") -> bool:
     """Returns False when not configured (nothing sent)."""
     key = (os.environ.get("FIOLE_USAGE_KEY") or "").strip()
     if not key:
         return False
     endpoint = (os.environ.get("FIOLE_USAGE_ENDPOINT") or DEFAULT_ENDPOINT).strip()
-    payload = {"tool": "fiole", "event": "login", "email": email, "key": key}
+    payload = {"tool": tool, "event": "login", "email": email, "key": key}
     t = threading.Thread(target=_post, args=(payload, endpoint), daemon=True)
     t.start()
     if wait:

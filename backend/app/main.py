@@ -46,6 +46,7 @@ from .models import (
 from . import mailer
 from . import usage_report
 from . import sharing
+from . import sso
 from . import styles as style_lib
 from .stats import ENGINE, catalog, run_analysis
 
@@ -67,6 +68,8 @@ def add_missing_columns():
 
 app = FastAPI(title="Fiole API", version="0.1.0", lifespan=lifespan)
 app.include_router(sharing.router)
+app.include_router(sso.router)
+app.middleware("http")(sso.cors_middleware)
 
 
 def utcnow():

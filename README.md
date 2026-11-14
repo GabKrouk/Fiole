@@ -84,6 +84,15 @@ Configuration (environment variables): `FIOLE_DATABASE_URL`
 | `FIOLE_MAIL_FROM` + one of `FIOLE_BREVO_API_KEY`, `FIOLE_RESEND_API_KEY`, `FIOLE_SMTP_HOST` (`_PORT`, `_USER`, `_PASSWORD`) | sharing notifications by email. Unset = no email is sent, and the app says so |
 | `FIOLE_PUBLIC_URL` | address used in email links (default: the request's address) |
 
+### One account for Fiole, Régine and GeneCloud
+
+Régine and GeneCloud (static pages of `https://gabkrouk.github.io`) sign their users in with their Fiole account, through
+[`tools-usage/account.js`](https://github.com/GabKrouk/tools-usage/blob/main/account.js): the tool sends the user to
+`/connect?tool=regine&return=<page>`, Fiole sends them back with a token that only identifies the user
+(`GET /api/sso/me`, no access to projects). Each sign-in, and at most one visit per 12 h, is reported to tools-usage under
+the tool's name (code: `backend/app/sso.py`). `FIOLE_SSO_ORIGINS` (default `https://gabkrouk.github.io`) and
+`FIOLE_SSO_TOOLS` (default `regine,genecloud`) list the sites and tools allowed.
+
 ## Tests
 
 ```bash
