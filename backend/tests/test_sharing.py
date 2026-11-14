@@ -6,7 +6,7 @@ os.environ.setdefault("FIOLE_DATABASE_URL", "postgresql+psycopg2://app:app@local
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import config, mailer  # noqa: E402
+from app import mailer  # noqa: E402
 from app.db import Base, engine  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -24,9 +24,9 @@ def no_mail_provider(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
-def client(email, opt_in=False):
+def client(email):
     c = TestClient(app)
-    r = c.post("/api/auth/register", json={"email": email, "password": "correct horse", "display_name": email.split("@")[0], "donation_opt_in": opt_in})
+    r = c.post("/api/auth/register", json={"email": email, "password": "correct horse", "display_name": email.split("@")[0]})
     assert r.status_code == 200, r.text
     return c
 
@@ -205,30 +205,18 @@ def test_style_sharing_public_gallery_and_copy():
     assert b.get(f"/api/styles/{st['id']}/export").status_code == 404
 
 
-def test_donation_consent_logins_and_admin_export(monkeypatch):
-    yes = client("donor@x.org", opt_in=True)
-    no = client("nodonor@x.org", opt_in=False)
-    me = yes.get("/api/auth/me").json()
-    assert me["donation_opt_in"] is True and me["donation_opt_in_at"] and me["is_admin"] is False
-    assert no.get("/api/auth/me").json()["donation_opt_in"] is False
-    # change of mind later
-    r = no.patch("/api/auth/me", json={"donation_opt_in": True}).json()
-    assert r["donation_opt_in"] is True
-    no.patch("/api/auth/me", json={"donation_opt_in": False})
-    login("donor@x.org")
-    # admin only
-    assert yes.get("/api/admin/summary").status_code == 403
-    assert yes.get("/api/admin/donation-optins.csv").status_code == 403
-    assert TestClient(app).get("/api/admin/donation-optins.csv").status_code == 401
-    monkeypatch.setattr(config, "ADMIN_EMAILS", {"donor@x.org"})
-    import app.main as m
-    monkeypatch.setattr(m, "ADMIN_EMAILS", {"donor@x.org"})
-    assert yes.get("/api/auth/me").json()["is_admin"] is True
-    s = yes.get("/api/admin/summary").json()
-    assert s["donation_opt_in"] >= 1 and s["accounts"] >= 2 and s["email_configured"] is False
-    csv_text = yes.get("/api/admin/donation-optins.csv").text
-    assert "donor@x.org" in csv_text and "nodonor@x.org" not in csv_text  # never people who did not opt in
-    assert "opted_in_at" in csv_text.splitlines()[0]
+def test_signin_recorded_and_no_donation_fields():
+    c = client("plain@x.org")
+    me = c.get("/api/auth/me").json()
+    assert set(me) == {"id", "email", "display_name", "locale"}
+    login("plain@x.org")
+    assert c.get("/api/admin/summary").status_code in (404, 405)  # no admin page any more
+    from sqlalchemy import select
+    from app.db import SessionLocal
+    from app.models import User
+    with SessionLocal() as db:
+        u = db.execute(select(User).where(User.email == "plain@x.org")).scalar_one()
+        assert u.login_count == 2 and u.last_login_at is not None
 
 
 def test_mailer_never_fakes(monkeypatch):

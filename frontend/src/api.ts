@@ -6,9 +6,6 @@ export interface User {
   email: string;
   display_name: string;
   locale: "fr" | "en";
-  donation_opt_in: boolean | null;
-  donation_opt_in_at: string | null;
-  is_admin: boolean;
 }
 
 export interface ProjectSummary {

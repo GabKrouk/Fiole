@@ -62,20 +62,15 @@ class User(Base):
     email_verified: Mapped[bool] = mapped_column(default=False)
     locale: Mapped[str] = mapped_column(String(5), default="fr")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    # Every account is recorded (email + last sign-in). The yearly donation appeal goes ONLY to people who
-    # opted in: None = never asked, True/False = their answer, with the date it was given (GDPR consent record).
+    # every account is recorded (email + last sign-in); sign-ins are also reported to the tools-usage dashboard
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     login_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    donation_opt_in: Mapped[bool | None] = mapped_column(nullable=True)
-    donation_opt_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # Columns added after the first deployment: create_all() does not alter existing tables, so they are added here.
 ADDED_COLUMNS = [
     ("users", "last_login_at", "TIMESTAMP WITH TIME ZONE"),
     ("users", "login_count", "INTEGER NOT NULL DEFAULT 0"),
-    ("users", "donation_opt_in", "BOOLEAN"),
-    ("users", "donation_opt_in_at", "TIMESTAMP WITH TIME ZONE"),
 ]
 
 

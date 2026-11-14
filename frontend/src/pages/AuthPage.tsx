@@ -13,7 +13,6 @@ export default function AuthPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
-  const [donate, setDonate] = useState(false);
   const from = (loc.state as { from?: string } | null)?.from || "";
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -26,7 +25,7 @@ export default function AuthPage() {
       const u =
         mode === "login"
           ? await api.post<User>("/api/auth/login", { email, password })
-          : await api.post<User>("/api/auth/register", { email, password, display_name: name || email.split("@")[0], locale: lang, donation_opt_in: donate });
+          : await api.post<User>("/api/auth/register", { email, password, display_name: name || email.split("@")[0], locale: lang });
       setUser(u);
       nav(from || "/");
     } catch (err) {
@@ -52,15 +51,6 @@ export default function AuthPage() {
         )}
         <label className="field"><span>{t("email")}</span><input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" /></label>
         <label className="field"><span>{t("password")}</span><input type="password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} /></label>
-        {mode === "register" && (
-          <label className="check consent">
-            <input type="checkbox" checked={donate} onChange={(e) => setDonate(e.target.checked)} />
-            <span>{lang === "fr" ? "Recevoir l’appel aux dons annuel" : "Receive the yearly donation appeal"}<br />
-              <span className="small-text muted">{lang === "fr"
-                ? "Fiole est gratuit. Une fois par an, au plus, nous pourrons vous écrire pour demander un soutien. Facultatif, modifiable à tout moment dans « Mon compte »."
-                : "Fiole is free. At most once a year we may write to ask for support. Optional, change it any time in “My account”."}</span></span>
-          </label>
-        )}
         {error && <div className="notice error" role="alert">{error}</div>}
         {mode === "register" && <p className="small-text muted">{lang === "fr" ? "Votre email sert à votre compte, au partage, et au suivi d’utilisation de Fiole. Il n’est jamais vendu ni transmis." : "Your email is used for your account, sharing, and Fiole usage statistics. It is never sold or passed on."}</p>}
         <button className="primary" style={{ width: "100%", justifyContent: "center", marginTop: 6 }} disabled={busy}>

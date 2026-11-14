@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from . import importers
 from .auth import create_session, current_user, delete_session, hash_password, verify_password
 from .authz import LINK_ROLE, Action, allowed_actions, effective_role, require
-from .config import ADMIN_EMAILS, COOKIE_SECURE, MAX_UPLOAD_BYTES, SESSION_COOKIE, SESSION_DAYS
+from .config import COOKIE_SECURE, MAX_UPLOAD_BYTES, SESSION_COOKIE, SESSION_DAYS
 from .db import Base, engine, get_db
 from .figures.render import FigureError, render_figure, to_pdf, to_png
 from .models import (
@@ -86,7 +86,6 @@ class RegisterIn(BaseModel):
     password: str = Field(min_length=8, max_length=200)
     display_name: str = Field(min_length=1, max_length=200)
     locale: Literal["fr", "en"] = "fr"
-    donation_opt_in: bool = False  # explicit, unticked by default
 
 
 class LoginIn(BaseModel):
@@ -94,21 +93,8 @@ class LoginIn(BaseModel):
     password: str
 
 
-def is_admin(u: User) -> bool:
-    return u.email.lower() in ADMIN_EMAILS
-
-
 def user_out(u: User) -> dict:
-    return {"id": u.id, "email": u.email, "display_name": u.display_name, "locale": u.locale,
-            "donation_opt_in": u.donation_opt_in, "donation_opt_in_at": u.donation_opt_in_at.isoformat() if u.donation_opt_in_at else None,
-            "is_admin": is_admin(u)}
-
-
-def set_donation_consent(db: Session, u: User, value: bool, source: str) -> None:
-    u.donation_opt_in = value
-    u.donation_opt_in_at = utcnow()
-    # the audit log keeps every change of mind, with its date (GDPR proof of consent)
-    audit(db, u, None, "consent.donation_appeal", "user", u.id, value=value, source=source)
+    return {"id": u.id, "email": u.email, "display_name": u.display_name, "locale": u.locale}
 
 
 def signed_in(db: Session, u: User) -> None:
@@ -135,7 +121,6 @@ def register(body: RegisterIn, response: Response, db: Session = Depends(get_db)
     u = User(email=email, display_name=body.display_name.strip(), password_hash=hash_password(body.password), locale=body.locale)
     db.add(u)
     db.flush()
-    set_donation_consent(db, u, body.donation_opt_in, "signup")
     signed_in(db, u)
     db.commit()
     _set_cookie(response, create_session(db, u))
@@ -169,7 +154,6 @@ def me(user: User = Depends(current_user)):
 class MeIn(BaseModel):
     locale: Literal["fr", "en"] | None = None
     display_name: str | None = None
-    donation_opt_in: bool | None = None
 
 
 @app.patch("/api/auth/me")
@@ -179,8 +163,6 @@ def update_me(body: MeIn, user: User = Depends(current_user), db: Session = Depe
         u.locale = body.locale
     if body.display_name:
         u.display_name = body.display_name.strip()
-    if body.donation_opt_in is not None and body.donation_opt_in != u.donation_opt_in:
-        set_donation_consent(db, u, body.donation_opt_in, "settings")
     db.commit()
     return user_out(u)
 
@@ -1124,46 +1106,6 @@ async def import_archive(file: UploadFile = File(...), user: User = Depends(curr
         db.add(AnalysisResult(analysis_id=a.id, analysis_version=a.version, dataset_version=d.version, result=res, engine_version=ENGINE, created_by=user.id))
     db.commit()
     return {"id": p.id, "url": f"/p/{p.id}"}
-
-
-# ------------------------------------------------------------------ admin (FIOLE_ADMIN_EMAILS)
-
-
-def require_admin(user: User = Depends(current_user)) -> User:
-    if not is_admin(user):
-        raise HTTPException(403, detail={"code": "admin_only"})
-    return user
-
-
-@app.get("/api/admin/summary")
-def admin_summary(user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    from sqlalchemy import func
-    total = db.scalar(select(func.count()).select_from(User))
-    opted = db.scalar(select(func.count()).select_from(User).where(User.donation_opt_in.is_(True)))
-    declined = db.scalar(select(func.count()).select_from(User).where(User.donation_opt_in.is_(False)))
-    since = datetime.now(timezone.utc).replace(microsecond=0)
-    from datetime import timedelta
-    active30 = db.scalar(select(func.count()).select_from(User).where(User.last_login_at >= since - timedelta(days=30)))
-    projects = db.scalar(select(func.count()).select_from(Project).where(Project.deleted_at.is_(None)))
-    return {"accounts": total, "donation_opt_in": opted, "donation_declined": declined, "donation_not_asked": total - opted - declined,
-            "active_30_days": active30, "projects": projects, "email_configured": mailer.configured(), "email_provider": mailer.provider(),
-            "usage_dashboard": usage_report.configured()}
-
-
-@app.get("/api/admin/donation-optins.csv")
-def admin_donors_csv(user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    """Only people who explicitly opted in to the yearly donation appeal (GDPR: never the others)."""
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["email", "display_name", "locale", "opted_in_at", "account_created_at", "last_login_at"])
-    for u in db.execute(select(User).where(User.donation_opt_in.is_(True)).order_by(User.email)).scalars():
-        w.writerow([u.email, u.display_name, u.locale, u.donation_opt_in_at.isoformat() if u.donation_opt_in_at else "",
-                    u.created_at.isoformat(), u.last_login_at.isoformat() if u.last_login_at else ""])
-    audit(db, user, None, "admin.export_donation_optins", "user", user.id)
-    db.commit()
-    stamp = utcnow().strftime("%Y-%m-%d")
-    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": disposition(f"fiole-appel-aux-dons-{stamp}.csv")})
 
 
 @app.get("/api/health")

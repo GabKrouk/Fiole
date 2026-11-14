@@ -6,7 +6,7 @@ import { useI18n } from "./i18n";
 import AuthPage from "./pages/AuthPage";
 import Dashboard from "./pages/Dashboard";
 import ProjectPage from "./pages/ProjectPage";
-import { AccountDialog, AdminPage, ConsentBanner } from "./components/Account";
+import { AccountDialog } from "./components/Account";
 
 interface AuthCtx {
   user: User | null;
@@ -74,7 +74,6 @@ export function TopBar({ children, right }: { children?: React.ReactNode; right?
         </>
       )}
     </header>
-    <ConsentBanner />
     {account && <AccountDialog onClose={() => setAccount(false)} />}
     </>
   );
@@ -108,7 +107,6 @@ export default function App() {
         <Route path="/login" element={user ? <Navigate to="/" /> : <AuthPage />} />
         <Route path="/" element={user ? <Dashboard /> : <Navigate to="/login" />} />
         <Route path="/p/:projectId/*" element={user ? <ProjectPage /> : <Navigate to="/login" state={{ from: location.pathname + location.search }} />} />
-        <Route path="/admin" element={user ? <AdminPage /> : <Navigate to="/login" state={{ from: "/admin" }} />} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </AuthContext.Provider>
