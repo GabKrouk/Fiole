@@ -347,15 +347,16 @@ def touch(p: Project):
 @app.post("/api/projects/{project_id}/import/preview")
 async def import_preview(
     project_id: str,
-    file: UploadFile | None = File(default=None),
-    text: str | None = Form(default=None),
-    delimiter: str | None = Form(default=None),
-    decimal: str | None = Form(default=None),
-    header: str | None = Form(default=None),
-    sheet: str | None = Form(default=None),
+    request: Request,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
+    # Parsed by hand: the default form limit (1 MB per field) is far too small for a pasted table.
+    form = await request.form(max_part_size=MAX_UPLOAD_BYTES, max_files=2, max_fields=20)
+    file = form.get("file")
+    file = file if hasattr(file, "read") else None
+    get = lambda k: (v if isinstance(v := form.get(k), str) else None)  # noqa: E731
+    text, delimiter, decimal, header, sheet = get("text"), get("delimiter"), get("decimal"), get("header"), get("sheet")
     require(db, user, project_id, Action.EDIT)
     hdr = None if header in (None, "", "auto") else header in ("1", "true", "yes")
     delim = {"tab": "\t", "\\t": "\t"}.get(delimiter or "", delimiter) or None
