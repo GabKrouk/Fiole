@@ -31,6 +31,7 @@ from .models import (
     Figure,
     Layout,
     Project,
+    Trash,
     ProjectMember,
     RawUpload,
     FigureStyle,
@@ -1074,6 +1075,170 @@ def export_layout(project_id: str, layout_id: str, format: Literal["svg", "pdf",
     if format == "pdf":
         return Response(to_pdf(svg), media_type="application/pdf", headers=headers)
     return Response(to_png(svg, max(72, min(dpi, 1200))), media_type="image/png", headers=headers)
+
+
+# ------------------------------------------------------------------ cleanup: delete several items, see the impact, undo
+
+
+class BulkDeleteIn(BaseModel):
+    analyses: list[str] = []
+    figures: list[str] = []
+    layouts: list[str] = []
+    dry_run: bool = False
+
+
+def _dt(v):
+    return v.isoformat() if isinstance(v, datetime) else v
+
+
+def _undt(v):
+    return datetime.fromisoformat(v) if isinstance(v, str) else v
+
+
+def _strip_refs(cfg: dict, gone: set[str]) -> tuple[dict, list, dict]:
+    """Remove star annotations pointing at deleted analyses. Returns (new cfg, removed top-level, removed per-variable)."""
+    import copy
+
+    cfg = copy.deepcopy(cfg or {})
+    anns = cfg.get("annotations") or []
+    removed = [a for a in anns if a.get("type") == "pvalue" and a.get("analysis_id") in gone]
+    cfg["annotations"] = [a for a in anns if a not in removed]
+    removed_per = {}
+    for k, v in (cfg.get("per_y") or {}).items():
+        sa = (v or {}).get("annotations") or []
+        out = [a for a in sa if a.get("analysis_id") in gone]
+        if out:
+            removed_per[k] = out
+            v["annotations"] = [a for a in sa if a not in out]
+    return cfg, removed, removed_per
+
+
+@app.post("/api/projects/{project_id}/bulk-delete")
+def bulk_delete(project_id: str, body: BulkDeleteIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    p = require(db, user, project_id, Action.EDIT)
+    an = [a for a in (db.get(Analysis, i) for i in dict.fromkeys(body.analyses)) if a and a.project_id == p.id]
+    fg = [f for f in (db.get(Figure, i) for i in dict.fromkeys(body.figures)) if f and f.project_id == p.id]
+    ly = [x for x in (db.get(Layout, i) for i in dict.fromkeys(body.layouts)) if x and x.project_id == p.id]
+    gone_a, gone_f, gone_l = {a.id for a in an}, {f.id for f in fg}, {x.id for x in ly}
+    # impact on what stays
+    fig_hits, lay_hits = [], []
+    for f in db.execute(select(Figure).where(Figure.project_id == p.id)).scalars():
+        if f.id in gone_f:
+            continue
+        _, rem, rem_per = _strip_refs(f.config, gone_a)
+        if rem or rem_per:
+            fig_hits.append((f, rem, rem_per))
+    for x in db.execute(select(Layout).where(Layout.project_id == p.id)).scalars():
+        if x.id in gone_l:
+            continue
+        lost = [pn for pn in (x.config or {}).get("panels") or [] if pn.get("figure_id") in gone_f]
+        if lost:
+            lay_hits.append((x, lost))
+    impact = {
+        "analyses": [{"id": a.id, "name": a.name} for a in an],
+        "figures": [{"id": f.id, "name": f.name} for f in fg],
+        "layouts": [{"id": x.id, "name": x.name} for x in ly],
+        "figures_losing_stars": [{"id": f.id, "name": f.name, "count": len(rem) + sum(len(v) for v in rp.values())} for f, rem, rp in fig_hits],
+        "layouts_losing_panels": [{"id": x.id, "name": x.name, "count": len(lost)} for x, lost in lay_hits],
+    }
+    if body.dry_run or not (an or fg or ly):
+        return {"impact": impact, "trash_id": None}
+    payload = {
+        "analyses": [{"id": a.id, "dataset_id": a.dataset_id, "name": a.name, "kind": a.kind, "config": a.config, "version": a.version,
+                      "created_at": _dt(a.created_at), "updated_at": _dt(a.updated_at),
+                      "results": [{"analysis_version": r.analysis_version, "dataset_version": r.dataset_version, "result": r.result,
+                                   "engine_version": r.engine_version, "created_at": _dt(r.created_at), "created_by": r.created_by}
+                                  for r in db.execute(select(AnalysisResult).where(AnalysisResult.analysis_id == a.id).order_by(AnalysisResult.id)).scalars()]}
+                     for a in an],
+        "figures": [{"id": f.id, "dataset_id": f.dataset_id, "name": f.name, "kind": f.kind, "config": f.config, "version": f.version,
+                     "created_at": _dt(f.created_at), "updated_at": _dt(f.updated_at)} for f in fg],
+        "layouts": [{"id": x.id, "name": x.name, "config": x.config, "version": x.version, "created_at": _dt(x.created_at), "updated_at": _dt(x.updated_at)} for x in ly],
+        "figure_refs": [{"id": f.id, "annotations": rem, "per_y": rp} for f, rem, rp in fig_hits],
+        "layout_refs": [{"id": x.id, "panels": lost} for x, lost in lay_hits],
+    }
+    for f, _rem, _rp in fig_hits:
+        f.config = _strip_refs(f.config, gone_a)[0]
+        f.version += 1
+        f.updated_at = utcnow()
+    for x, _lost in lay_hits:
+        x.config = {**(x.config or {}), "panels": [pn for pn in (x.config or {}).get("panels") or [] if pn.get("figure_id") not in gone_f]}
+        x.version += 1
+        x.updated_at = utcnow()
+    for obj in [*an, *fg, *ly]:
+        db.delete(obj)
+    t = Trash(project_id=p.id, user_id=user.id, payload=payload)
+    db.add(t)
+    db.flush()
+    audit(db, user, p.id, "bulk.delete", "trash", str(t.id), analyses=len(an), figures=len(fg), layouts=len(ly))
+    touch(p)
+    db.commit()
+    return {"impact": impact, "trash_id": t.id}
+
+
+@app.post("/api/projects/{project_id}/trash/{trash_id}/restore")
+def restore_trash(project_id: str, trash_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    p = require(db, user, project_id, Action.EDIT)
+    t = db.get(Trash, trash_id)
+    if t is None or t.project_id != p.id:
+        raise HTTPException(404, detail={"code": "trash_not_found"})
+    if t.restored_at is not None:
+        raise HTTPException(409, detail={"code": "already_restored"})
+    pl = t.payload
+    ds_ids = {d for (d,) in db.execute(select(Dataset.id).where(Dataset.project_id == p.id)).all()}
+    skipped = 0
+    for a in pl.get("analyses", []):
+        if a["dataset_id"] not in ds_ids or db.get(Analysis, a["id"]):
+            skipped += 1
+            continue
+        db.add(Analysis(id=a["id"], project_id=p.id, dataset_id=a["dataset_id"], name=a["name"], kind=a["kind"], config=a["config"],
+                        version=a["version"], created_at=_undt(a["created_at"]), updated_at=_undt(a["updated_at"])))
+        db.flush()
+        for r in a["results"]:
+            db.add(AnalysisResult(analysis_id=a["id"], analysis_version=r["analysis_version"], dataset_version=r["dataset_version"], result=r["result"],
+                                  engine_version=r["engine_version"], created_at=_undt(r["created_at"]), created_by=r.get("created_by")))
+    for f in pl.get("figures", []):
+        if f["dataset_id"] not in ds_ids or db.get(Figure, f["id"]):
+            skipped += 1
+            continue
+        db.add(Figure(id=f["id"], project_id=p.id, dataset_id=f["dataset_id"], name=f["name"], kind=f["kind"], config=f["config"],
+                      version=f["version"], created_at=_undt(f["created_at"]), updated_at=_undt(f["updated_at"])))
+    for x in pl.get("layouts", []):
+        if db.get(Layout, x["id"]):
+            skipped += 1
+            continue
+        db.add(Layout(id=x["id"], project_id=p.id, name=x["name"], config=x["config"], version=x["version"],
+                      created_at=_undt(x["created_at"]), updated_at=_undt(x["updated_at"])))
+    db.flush()
+    # put the stars and panels back into what stayed (without overwriting later edits)
+    for ref in pl.get("figure_refs", []):
+        f = db.get(Figure, ref["id"])
+        if not f:
+            continue
+        import copy
+
+        cfg = copy.deepcopy(f.config or {})
+        cfg["annotations"] = (cfg.get("annotations") or []) + [a for a in ref["annotations"] if a not in (cfg.get("annotations") or [])]
+        for k, anns in (ref.get("per_y") or {}).items():
+            slot = (cfg.setdefault("per_y", {})).setdefault(k, {})
+            slot["annotations"] = (slot.get("annotations") or []) + anns
+        f.config = cfg
+        f.version += 1
+        f.updated_at = utcnow()
+    for ref in pl.get("layout_refs", []):
+        x = db.get(Layout, ref["id"])
+        if not x:
+            continue
+        panels = list((x.config or {}).get("panels") or [])
+        used = {pn.get("cell") for pn in panels}
+        panels += [pn for pn in ref["panels"] if pn.get("cell") not in used]
+        x.config = {**(x.config or {}), "panels": sorted(panels, key=lambda pn: pn.get("cell", 0))}
+        x.version += 1
+        x.updated_at = utcnow()
+    t.restored_at = utcnow()
+    audit(db, user, p.id, "bulk.restore", "trash", str(t.id), skipped=skipped)
+    touch(p)
+    db.commit()
+    return {"ok": True, "skipped": skipped}
 
 
 # ------------------------------------------------------------------ figure styles (per user; sharing in phase 2)

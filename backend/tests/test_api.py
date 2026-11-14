@@ -241,3 +241,48 @@ def test_duplicate_per_variable_and_layout_export():
     assert v.post(f"/api/projects/{pid}/figures/{fig['id']}/duplicate", json={}).status_code == 403
     assert v.post(f"/api/projects/{pid}/layouts", json={"name": "x"}).status_code == 403
     assert v.get(f"/api/projects/{pid}/layouts/{lay['id']}/export?format=svg").status_code == 200
+
+
+def test_bulk_delete_impact_and_undo():
+    c = client("cleanup@example.org")
+    pid = c.post("/api/projects", json={"name": "Ménage"}).json()["id"]
+    rows = [{"id": f"r{i}", "cells": {"g": "A" if i % 2 else "B", "v": i + (i % 2) * 3}} for i in range(12)]
+    did = c.post(f"/api/projects/{pid}/datasets", json={"name": "T", "content": {"columns": [{"id": "g", "name": "G", "type": "text"}, {"id": "v", "name": "V", "type": "numeric"}],
+                                                                                "rows": rows, "design": {"layout": "wide", "group_columns": []}}}).json()["id"]
+    an = c.post(f"/api/projects/{pid}/analyses", json={"dataset_id": did, "kind": "pairwise", "name": "Étoiles", "config": {"group_col": "g", "value_col": "v"}}).json()
+    c.post(f"/api/projects/{pid}/analyses/{an['id']}/run")
+    other = c.post(f"/api/projects/{pid}/analyses", json={"dataset_id": did, "kind": "ttest", "name": "Brouillon", "config": {}}).json()
+    f1 = c.post(f"/api/projects/{pid}/figures", json={"dataset_id": did, "name": "Figure 1", "config": {"type": "box", "group_col": "g", "value_col": "v",
+               "annotations": [{"type": "pvalue", "analysis_id": an["id"], "all": True}, {"type": "text", "text": "x"}]}}).json()
+    f2 = c.post(f"/api/projects/{pid}/figures", json={"dataset_id": did, "name": "Figure 2", "config": {"type": "box", "group_col": "g", "value_col": "v"}}).json()
+    lay = c.post(f"/api/projects/{pid}/layouts", json={"name": "Page", "config": {"rows": 1, "cols": 2, "panels": [{"cell": 0, "figure_id": f1["id"]}, {"cell": 1, "figure_id": f2["id"]}]}}).json()
+
+    # dry run: says what is affected, deletes nothing
+    r = c.post(f"/api/projects/{pid}/bulk-delete", json={"analyses": [an["id"], other["id"]], "figures": [f2["id"]], "dry_run": True}).json()
+    assert r["trash_id"] is None
+    assert r["impact"]["figures_losing_stars"] == [{"id": f1["id"], "name": "Figure 1", "count": 1}]
+    assert r["impact"]["layouts_losing_panels"] == [{"id": lay["id"], "name": "Page", "count": 1}]
+    assert len(c.get(f"/api/projects/{pid}").json()["analyses"]) == 2
+
+    r = c.post(f"/api/projects/{pid}/bulk-delete", json={"analyses": [an["id"], other["id"]], "figures": [f2["id"]]}).json()
+    proj = c.get(f"/api/projects/{pid}").json()
+    assert proj["analyses"] == [] and [f["name"] for f in proj["figures"]] == ["Figure 1"]
+    fig1 = proj["figures"][0]
+    assert [a["type"] for a in fig1["config"]["annotations"]] == ["text"] and not fig1["stale"]
+    assert proj["layouts"][0]["config"]["panels"] == [{"cell": 0, "figure_id": f1["id"]}]
+
+    # undo puts everything back, including results, stars and the layout panel
+    assert c.post(f"/api/projects/{pid}/trash/{r['trash_id']}/restore").json()["ok"]
+    proj = c.get(f"/api/projects/{pid}").json()
+    assert sorted(a["name"] for a in proj["analyses"]) == ["Brouillon", "Étoiles"]
+    st = [a for a in proj["analyses"] if a["id"] == an["id"]][0]
+    assert st["status"] == "up_to_date"
+    assert sorted(f["name"] for f in proj["figures"]) == ["Figure 1", "Figure 2"]
+    fig1 = [f for f in proj["figures"] if f["id"] == f1["id"]][0]
+    assert any(a.get("analysis_id") == an["id"] for a in fig1["config"]["annotations"])
+    assert len(proj["layouts"][0]["config"]["panels"]) == 2
+    assert c.post(f"/api/projects/{pid}/trash/{r['trash_id']}/restore").status_code == 409
+    # viewers cannot delete
+    v = client("cleanup-viewer@example.org")
+    c.post(f"/api/projects/{pid}/members", json={"emails": ["cleanup-viewer@example.org"], "role": "viewer", "notify": False})
+    assert v.post(f"/api/projects/{pid}/bulk-delete", json={"figures": [f1["id"]]}).status_code == 403

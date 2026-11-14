@@ -297,3 +297,16 @@ class Layout(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Trash(Base):
+    """What a bulk delete removed (analyses + results, figures, layouts, and the star / panel references taken out
+    of the remaining figures and layouts), so that "Undo" can put everything back exactly."""
+
+    __tablename__ = "trash"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONType)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    restored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

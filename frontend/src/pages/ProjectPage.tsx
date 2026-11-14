@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Route, Routes, useNavigate, useParams, useLocation } from "react-router-dom";
 import { api, ApiError, ProjectFull, AnalysisType, Dataset } from "../api";
 import { smartDefaults } from "../columns";
@@ -12,6 +12,34 @@ import ImportDialog from "../components/ImportDialog";
 import ShareDialog from "../components/ShareDialog";
 import NoAccess from "../components/NoAccess";
 import { BUILD } from "../theme";
+import Modal from "../components/Modal";
+
+interface Impact {
+  analyses: { id: string; name: string }[];
+  figures: { id: string; name: string }[];
+  layouts: { id: string; name: string }[];
+  figures_losing_stars: { id: string; name: string; count: number }[];
+  layouts_losing_panels: { id: string; name: string; count: number }[];
+}
+
+function DeleteConfirm({ impact, lang, onClose, onGo }: { impact: Impact; lang: string; onClose: () => void; onGo: () => void }) {
+  const T = (fr: string, en: string) => (lang === "fr" ? fr : en);
+  const n = impact.analyses.length + impact.figures.length + impact.layouts.length;
+  const list = (title: string, items: { name: string }[]) => items.length > 0 && <><b>{title}</b><ul className="del-list">{items.map((x, i) => <li key={i}>{x.name}</li>)}</ul></>;
+  return (
+    <Modal title={T(`Supprimer ${n} élément${n > 1 ? "s" : ""} ?`, `Delete ${n} item${n > 1 ? "s" : ""}?`)} onClose={onClose} narrow
+      footer={<><button onClick={onClose}>{T("Annuler", "Cancel")}</button><button className="danger primary" autoFocus onClick={onGo}>{T("Supprimer", "Delete")}</button></>}>
+      {list(T("Analyses", "Analyses"), impact.analyses)}
+      {list(T("Figures", "Figures"), impact.figures)}
+      {list(T("Mises en page", "Layouts"), impact.layouts)}
+      {(impact.figures_losing_stars.length > 0 || impact.layouts_losing_panels.length > 0) && <div className="notice warn">
+        {impact.figures_losing_stars.map((f) => <div key={f.id}>⚠ {T(`« ${f.name} » perdra ses étoiles de significativité (elles viennent d’une analyse supprimée).`, `“${f.name}” will lose its significance stars (they come from a deleted analysis).`)}</div>)}
+        {impact.layouts_losing_panels.map((l) => <div key={l.id}>⚠ {T(`La mise en page « ${l.name} » perdra ${l.count} panneau${l.count > 1 ? "x" : ""}.`, `Layout “${l.name}” will lose ${l.count} panel${l.count > 1 ? "s" : ""}.`)}</div>)}
+      </div>}
+      <p className="small-text muted">{T("Les données ne sont pas touchées. Vous pourrez annuler juste après.", "The data are not touched. You can undo right after.")}</p>
+    </Modal>
+  );
+}
 
 export interface ProjectCtx {
   project: ProjectFull;
@@ -35,8 +63,16 @@ export default function ProjectPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(() => new URLSearchParams(window.location.search).has("share"));
   const [name, setName] = useState("");
-  const [toast, setToast] = useState("");
-  const flash = (m: string) => { setToast(m); window.setTimeout(() => setToast(""), 2200); };
+  const [toast, setToastState] = useState<{ msg: string; undo?: () => void } | null>(null);
+  const toastTimer = useRef<number>();
+  const showToast = (msg: string, undo?: () => void, ms = 2200) => {
+    window.clearTimeout(toastTimer.current);
+    setToastState({ msg, undo });
+    toastTimer.current = window.setTimeout(() => setToastState(null), ms);
+  };
+  const flash = (m: string) => showToast(m);
+  const [sel, setSel] = useState<string[]>([]);
+  const [confirm, setConfirm] = useState<{ keys: string[]; impact: Impact } | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -161,6 +197,45 @@ export default function ProjectPage() {
     nav(`${base}/layout/${l.id}`);
   }
 
+  const toggle = (k: string) => setSel((s) => (s.includes(k) ? s.filter((x) => x !== k) : [...s, k]));
+  const Item = ({ k, to, title, children }: { k: string; to: string; title?: string; children: ReactNode }) => {
+    const id = k.slice(2);
+    const on = sel.includes(k);
+    return (
+      <div className={`side-row ${on ? "selected" : ""} ${sel.length ? "selecting" : ""}`}>
+        {canEdit && sel.length > 0 && <input type="checkbox" className="side-check" checked={on} onChange={() => toggle(k)} aria-label={lang === "fr" ? "Sélectionner" : "Select"} />}
+        <button className={`side-item ${active.includes(id) ? "active" : ""}`} title={title}
+          onClick={(e) => { if (canEdit && (e.metaKey || e.ctrlKey || e.shiftKey)) { e.preventDefault(); toggle(k); } else if (sel.length) toggle(k); else nav(to); }}>
+          {children}
+        </button>
+        {canEdit && !sel.length && <button className="side-del" title={lang === "fr" ? "Supprimer (Cmd/Maj-clic pour en sélectionner plusieurs)" : "Delete (Cmd/Shift-click to select several)"}
+          aria-label={lang === "fr" ? "Supprimer" : "Delete"} onClick={() => askDelete([k])}>🗑</button>}
+      </div>
+    );
+  };
+  const bodyOf = (keys: string[]) => ({
+    analyses: keys.filter((k) => k.startsWith("a:")).map((k) => k.slice(2)),
+    figures: keys.filter((k) => k.startsWith("f:")).map((k) => k.slice(2)),
+    layouts: keys.filter((k) => k.startsWith("l:")).map((k) => k.slice(2)),
+  });
+  async function askDelete(keys: string[]) {
+    const r = await api.post<{ impact: Impact }>(`/api/projects/${project!.id}/bulk-delete`, { ...bodyOf(keys), dry_run: true });
+    setConfirm({ keys, impact: r.impact });
+  }
+  async function doDelete(keys: string[]) {
+    setConfirm(null);
+    const r = await api.post<{ trash_id: number }>(`/api/projects/${project!.id}/bulk-delete`, bodyOf(keys));
+    setSel([]);
+    if (keys.some((k) => loc.pathname.includes(k.slice(2)))) nav(base);
+    await reload();
+    const n = keys.length;
+    showToast(lang === "fr" ? `${n} élément${n > 1 ? "s" : ""} supprimé${n > 1 ? "s" : ""}.` : `${n} item${n > 1 ? "s" : ""} deleted.`, async () => {
+      await api.post(`/api/projects/${project!.id}/trash/${r.trash_id}/restore`);
+      await reload();
+      showToast(lang === "fr" ? "Suppression annulée : tout est revenu." : "Deletion undone: everything is back.");
+    }, 12000);
+  }
+
   const myRole = project.role ?? "viewer";
   const roleName = (r: string) => ({ owner: t("owner"), editor: lang === "fr" ? "Éditeur" : "Editor", viewer: lang === "fr" ? "Lecteur" : "Viewer" } as Record<string, string>)[r] ?? r;
 
@@ -196,29 +271,28 @@ export default function ProjectPage() {
             <h4>{t("analyses")}{canEdit && project.datasets.length > 0 && <button className="ghost small" onClick={newAnalysis}>+</button>}</h4>
             {project.analyses.length === 0 && <p className="small-text muted" style={{ padding: "0 8px" }}>{t("nothingYet")}</p>}
             {project.analyses.map((a) => (
-              <button key={a.id} className={`side-item ${active.includes(a.id) ? "active" : ""}`} onClick={() => nav(`${base}/analysis/${a.id}`)}
-                title={a.status === "stale" ? t("staleExplain") : ""}>
+              <Item key={a.id} k={`a:${a.id}`} to={`${base}/analysis/${a.id}`} title={a.status === "stale" ? t("staleExplain") : ""}>
                 <StatusDot status={a.status} /><span className="label">{a.name}</span>
                 {a.status === "stale" && <span className="badge stale">{t("stale")}</span>}
-              </button>
+              </Item>
             ))}
           </section>
           <section>
             <h4>{t("figures")}{canEdit && project.datasets.length > 0 && <button className="ghost small" onClick={newFigure}>+</button>}</h4>
             {project.figures.length === 0 && <p className="small-text muted" style={{ padding: "0 8px" }}>{t("nothingYet")}</p>}
             {project.figures.map((f) => (
-              <button key={f.id} className={`side-item ${active.includes(f.id) ? "active" : ""}`} onClick={() => nav(`${base}/figure/${f.id}`)}>
+              <Item key={f.id} k={`f:${f.id}`} to={`${base}/figure/${f.id}`}>
                 <span className="label">◩ {f.name}</span>{f.stale && <span className="badge stale">{t("stale")}</span>}
-              </button>
+              </Item>
             ))}
           </section>
           <section>
             <h4>{lang === "fr" ? "Mises en page (panneaux A, B, C…)" : "Layouts (panels A, B, C…)"}{canEdit && project.figures.length > 0 && <button className="ghost small" title={lang === "fr" ? "Nouvelle mise en page" : "New layout"} onClick={newLayout}>+</button>}</h4>
             {project.layouts.length === 0 && <p className="small-text muted" style={{ padding: "0 8px" }}>{project.figures.length ? (lang === "fr" ? "Assemblez plusieurs figures sur une page." : "Put several figures on one page.") : t("nothingYet")}</p>}
             {project.layouts.map((l) => (
-              <button key={l.id} className={`side-item ${active.includes(l.id) ? "active" : ""}`} onClick={() => nav(`${base}/layout/${l.id}`)}>
+              <Item key={l.id} k={`l:${l.id}`} to={`${base}/layout/${l.id}`}>
                 <span className="label">▤ {l.name}</span><span className="muted small-text">{(l.config.panels ?? []).length}</span>
-              </button>
+              </Item>
             ))}
           </section>
           <section>
@@ -236,6 +310,11 @@ export default function ProjectPage() {
               <span className="badge soon">{t("comments")}</span>
             </div>
           </section>
+          {sel.length > 0 && <div className="sel-bar">
+            <span className="grow">{sel.length} {lang === "fr" ? `sélectionné${sel.length > 1 ? "s" : ""}` : "selected"}</span>
+            <button className="small danger" onClick={() => askDelete(sel)}>🗑 {lang === "fr" ? "Supprimer la sélection" : "Delete selection"}</button>
+            <button className="ghost small" aria-label={lang === "fr" ? "Annuler la sélection" : "Clear selection"} onClick={() => setSel([])}>✕</button>
+          </div>}
           <div className="build-stamp" title="build">fiole · {BUILD}</div>
         </nav>
         <main className="main">
@@ -258,7 +337,9 @@ export default function ProjectPage() {
           </Routes>
         </main>
       </div>
-      {toast && <div className="toast" role="status">{toast}</div>}
+      {toast && <div className="toast" role="status">{toast.msg}
+        {toast.undo && <button className="small" style={{ marginLeft: 10 }} onClick={() => { const u = toast.undo!; setToastState(null); u(); }}>↶ {lang === "fr" ? "Annuler" : "Undo"}</button>}</div>}
+      {confirm && <DeleteConfirm impact={confirm.impact} lang={lang} onClose={() => setConfirm(null)} onGo={() => doDelete(confirm.keys)} />}
       {importOpen && <ImportDialog projectId={project.id} onClose={() => setImportOpen(false)} onCreated={async (id) => { setImportOpen(false); await reload(); nav(`${base}/data/${id}`); }} />}
       {shareOpen && <ShareDialog projectId={project.id} projectName={project.name} onClose={() => { setShareOpen(false); if (loc.search.includes("share")) nav(loc.pathname, { replace: true }); }} onLeft={() => nav("/")} />}
     </>
