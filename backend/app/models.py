@@ -1,0 +1,197 @@
+"""Database models.
+
+Phase-2 readiness: projects have members with roles (only `owner` is created in
+phase 1), entities carry optimistic-concurrency `version` numbers, and every
+dataset save produces an immutable DatasetVersion snapshot.
+"""
+from __future__ import annotations
+
+import enum
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .db import Base
+
+JSONType = JSON().with_variant(JSONB(), "postgresql")
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def new_id() -> str:
+    return str(uuid.uuid4())
+
+
+class Role(str, enum.Enum):
+    owner = "owner"
+    editor = "editor"
+    commenter = "commenter"
+    viewer = "viewer"
+
+
+class GeneralAccess(str, enum.Enum):
+    """Phase 2: 'anyone with the link'. Phase 1 always 'restricted'."""
+
+    restricted = "restricted"
+    link_viewer = "link_viewer"
+    link_commenter = "link_commenter"
+    link_editor = "link_editor"
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(200))
+    password_hash: Mapped[str] = mapped_column(String(300))
+    email_verified: Mapped[bool] = mapped_column(default=False)
+    locale: Mapped[str] = mapped_column(String(5), default="fr")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Project(Base):
+    __tablename__ = "projects"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(300))
+    description: Mapped[str] = mapped_column(Text, default="")
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    general_access: Mapped[GeneralAccess] = mapped_column(
+        Enum(GeneralAccess, name="general_access"), default=GeneralAccess.restricted
+    )
+    # Phase 2: owner may let editors manage sharing.
+    editors_can_share: Mapped[bool] = mapped_column(default=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    owner: Mapped[User] = relationship()
+    members: Mapped[list["ProjectMember"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+
+
+class ProjectMember(Base):
+    __tablename__ = "project_members"
+    __table_args__ = (UniqueConstraint("project_id", "user_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    role: Mapped[Role] = mapped_column(Enum(Role, name="project_role"))
+    added_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    project: Mapped[Project] = relationship(back_populates="members")
+    user: Mapped[User] = relationship(foreign_keys=[user_id])
+
+
+class RawUpload(Base):
+    """Original imported file, kept byte-for-byte."""
+
+    __tablename__ = "raw_uploads"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    filename: Mapped[str] = mapped_column(String(500))
+    content_type: Mapped[str] = mapped_column(String(200), default="")
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+    uploaded_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Dataset(Base):
+    """Current state of a data table. `content` = {columns, rows, design, exclusions}."""
+
+    __tablename__ = "datasets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(300))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    content: Mapped[dict] = mapped_column(JSONType)
+    source_upload_id: Mapped[str | None] = mapped_column(ForeignKey("raw_uploads.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+class DatasetVersion(Base):
+    __tablename__ = "dataset_versions"
+    __table_args__ = (UniqueConstraint("dataset_id", "version"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("datasets.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    content: Mapped[dict] = mapped_column(JSONType)
+    change_note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+class Analysis(Base):
+    __tablename__ = "analyses"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("datasets.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(300))
+    kind: Mapped[str] = mapped_column(String(64))
+    config: Mapped[dict] = mapped_column(JSONType)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AnalysisResult(Base):
+    __tablename__ = "analysis_results"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    analysis_id: Mapped[str] = mapped_column(ForeignKey("analyses.id", ondelete="CASCADE"), index=True)
+    analysis_version: Mapped[int] = mapped_column(Integer)
+    dataset_version: Mapped[int] = mapped_column(Integer)
+    result: Mapped[dict] = mapped_column(JSONType)
+    engine_version: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+class Figure(Base):
+    __tablename__ = "figures"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("datasets.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(300))
+    kind: Mapped[str] = mapped_column(String(64))
+    config: Mapped[dict] = mapped_column(JSONType)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    action: Mapped[str] = mapped_column(String(100))
+    target_type: Mapped[str] = mapped_column(String(50), default="")
+    target_id: Mapped[str] = mapped_column(String(64), default="")
+    detail: Mapped[dict] = mapped_column(JSONType, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
