@@ -325,3 +325,24 @@ def test_stars_from_another_y_variable_are_not_drawn():
                          results={"A": {"result": res, "stale": False, "value_col": "a"}})
     assert 'data-el="pvalue"' not in on_b["svg"]
     assert any("another Y variable" in w["en"] for w in on_b["warnings"])
+
+
+def test_xy_one_variable_vs_another_coloured_by_genotype():
+    """gab: N% vs C%, coloured by genotype. The X column must never come back as a Y series (old figures kept it in y)."""
+    import re as _re
+    from app.figures.render import render_figure
+    rows = []
+    for i in range(24):
+        g = ["Col", "nrt1.1", "tga1"][i % 3]
+        n = 6 + (i % 8) * 0.35
+        rows.append({"id": f"r{i}", "cells": {"g": g, "n": n, "c": 36 - n + (i % 3)}})
+    content = {"columns": [{"id": "g", "name": "Genotype", "type": "text"}, {"id": "n", "name": "N%", "type": "numeric"},
+                           {"id": "c", "name": "C%", "type": "numeric"}], "rows": rows, "design": {"layout": "wide"}, "exclusions": []}
+    cfg = {"type": "xy", "x": "n", "y": ["n", "c"], "color_by": "g", "regression_line": True, "width_mm": 80, "height_mm": 70}
+    out = render_figure(content, cfg)
+    svg = out["svg"]
+    groups = _re.findall(r'data-el="group" data-group="([^"]+)"', svg) or _re.findall(r'data-group="([^"]+)"', svg)
+    assert sorted(set(groups)) == ["Col", "nrt1.1", "tga1"], groups      # one series per genotype, no "N%" series
+    assert svg.count("<path d=\"M") >= 3                                   # one regression line per genotype
+    assert ">C%<" in svg or "C%" in svg                                    # Y axis titled with the Y column
+    assert "N% – " not in svg

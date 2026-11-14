@@ -404,6 +404,9 @@ def render_figure(content: dict, cfg_in: dict, results: dict[str, dict] | None =
     else:
         ys = cfg.get("y") or []
         ys = [ys] if isinstance(ys, str) else ys
+        # the X column is never a Y series (plotting X against itself is meaningless); keep the order, no duplicates
+        ys = [y for i, y in enumerate(ys) if y != cfg.get("x") and y not in ys[:i] and col_by_id(content, y)]
+        cfg["y"] = ys
         if not cfg["x_label"] and col_by_id(content, cfg.get("x")):
             cfg["x_label"] = col_by_id(content, cfg["x"])["name"]
         if not cfg["y_label"] and len(ys) == 1 and col_by_id(content, ys[0]):

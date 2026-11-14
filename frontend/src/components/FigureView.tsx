@@ -62,6 +62,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   const [bg, setBg] = useState<"white" | "transparent">("white");
   const [selected, setSelected] = useState<Selection | null>(null);
   const [starsBusy, setStarsBusy] = useState(false);
+  const [multiYState, setMultiY] = useState<boolean | null>(null);
   const [starsOpts, setStarsOpts] = useState<{ mode: string; control: string; test: string; correction: string }>({ mode: "all", control: "", test: "welch", correction: "holm" });
   const undoStack = useRef<Cfg[]>([]);
   const redoStack = useRef<Cfg[]>([]);
@@ -303,6 +304,9 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   const isGroup = GROUP_TYPES.includes(type);
   const numericCols = numericColumns(ds?.content);
   const factorCols = factorColumns(ds?.content);
+  const yList: string[] = (Array.isArray(cfg.y) ? cfg.y : cfg.y ? [cfg.y] : []).filter((y: string) => y !== cfg.x);
+  const yChoices = numericCols.filter((c) => c.id !== cfg.x);
+  const multiY = multiYState ?? yList.length > 1;
   const order: string[] = (cfg.group_order as string[] | undefined)?.filter((g) => groups.includes(g)).concat(groups.filter((g) => !(cfg.group_order || []).includes(g))) ?? groups;
   const palette = PALETTES[cfg.palette ?? "okabe_ito"];
   const w = cfg.width_mm ?? 80;
@@ -346,7 +350,18 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                   {ctx.project.datasets.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
                 </select></label>
               <label className="field"><span>{t("figureType")}</span>
-                <select value={type} disabled={!canEdit} onChange={(e) => set({ type: e.target.value })}>
+                <select value={type} disabled={!canEdit} onChange={(e) => {
+                  const ty = e.target.value;
+                  const patch: Cfg = { type: ty };
+                  if (!GROUP_TYPES.includes(ty)) {
+                    // sensible XY start: the figure's value column on Y, another numeric column on X, coloured by its groups
+                    const x = cfg.x && numericCols.some((c) => c.id === cfg.x) ? cfg.x : numericCols.find((c) => c.id !== cfg.value_col)?.id ?? numericCols[0]?.id;
+                    if (x && x !== cfg.x) patch.x = x;
+                    if (!yList.length || (x && yList.includes(x))) { const y = (cfg.value_col && cfg.value_col !== x ? cfg.value_col : numericCols.find((c) => c.id !== x)?.id); if (y) patch.y = [y]; }
+                    if (cfg.color_by === undefined && cfg.group_col) patch.color_by = cfg.group_col;
+                  }
+                  set(patch);
+                }}>
                   {[...GROUP_TYPES, ...XY_TYPES].map((k) => <option key={k} value={k}>{t(k as Key)}</option>)}
                   <option disabled>{t("doseResponse")} — {t("comingSoon")}</option>
                 </select></label>
@@ -369,25 +384,37 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
               )}
               {!isGroup && (
                 <>
+                  <label className="field"><span>{t("xColumn")}</span>
+                    <select value={cfg.x ?? ""} disabled={!canEdit} onChange={(e) => {
+                      const x = e.target.value;
+                      let y = yList.filter((c) => c !== x);
+                      if (!y.length) { const other = numericCols.find((c) => c.id !== x); y = other ? [other.id] : []; }
+                      set({ x, y });
+                    }}><option value="">—</option>{numericCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
+                  {!multiY ? (
+                    <label className="field"><span>{lang === "fr" ? "Colonne Y" : "Y column"}</span>
+                      <span className="row tight">
+                        <select className="grow" value={yList[0] ?? ""} disabled={!canEdit} onChange={(e) => switchY({ y: e.target.value ? [e.target.value] : [] })}>
+                          <option value="">—</option>{yChoices.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+                        {yList[0] && <StepButtons cols={yChoices.map((c) => c.id)} value={yList[0]} disabled={!canEdit} onChange={(v) => switchY({ y: [v] })} />}
+                      </span></label>
+                  ) : (
+                    <div className="field"><span>{t("yColumns")}</span>
+                      {yChoices.map((c) => (
+                        <label key={c.id} className="check" style={{ marginBottom: 2 }}><input type="checkbox" disabled={!canEdit} checked={yList.includes(c.id)}
+                          onChange={(e) => set({ y: e.target.checked ? [...yList, c.id] : yList.filter((x: string) => x !== c.id) })} /> {c.name}</label>
+                      ))}
+                    </div>
+                  )}
                   <label className="field"><span>{t("colorBy")}</span>
                     <select value={cfg.color_by ?? ""} disabled={!canEdit} onChange={(e) => set({ color_by: e.target.value || null, group_order: null })}>
                       <option value="">{t("none")}</option>
                       {factorCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                    </select></label>
-                  {Array.isArray(cfg.y) && cfg.y.length === 1 && (
-                    <div className="row tight" style={{ marginBottom: 8 }}>
-                      <span className="small-text muted grow">Y : {numericCols.find((c) => c.id === cfg.y[0])?.name}</span>
-                      <StepButtons cols={numericCols.filter((c) => c.id !== cfg.x).map((c) => c.id)} value={cfg.y[0]} disabled={!canEdit} onChange={(v) => switchY({ y: [v] })} />
-                    </div>
-                  )}
-                  <label className="field"><span>{t("xColumn")}</span>
-                    <select value={cfg.x ?? ""} disabled={!canEdit} onChange={(e) => set({ x: e.target.value })}><option value="">—</option>{numericCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
-                  <div className="field"><span>{t("yColumns")}</span>
-                    {numericCols.filter((c) => c.id !== cfg.x).map((c) => (
-                      <label key={c.id} className="check" style={{ marginBottom: 2 }}><input type="checkbox" disabled={!canEdit} checked={(cfg.y ?? []).includes(c.id)}
-                        onChange={(e) => set({ y: e.target.checked ? [...(cfg.y ?? []), c.id] : (cfg.y ?? []).filter((x: string) => x !== c.id) })} /> {c.name}</label>
-                    ))}
-                  </div>
+                    </select>
+                    <span className="small-text muted">{lang === "fr" ? "Une couleur, une droite et une entrée de légende par modalité (ex. génotype)." : "One colour, one line and one legend entry per level (e.g. genotype)."}</span></label>
+                  <label className="check small-text"><input type="checkbox" disabled={!canEdit} checked={multiY}
+                    onChange={(e) => { if (!e.target.checked) set({ y: yList.slice(0, 1) }); setMultiY(e.target.checked); }} />
+                    {lang === "fr" ? "Avancé : plusieurs colonnes Y sur la même figure" : "Advanced: several Y columns on one figure"}</label>
                 </>
               )}
             </div>
