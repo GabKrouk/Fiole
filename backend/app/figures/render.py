@@ -443,7 +443,7 @@ def render_figure(content: dict, cfg_in: dict, results: dict[str, dict] | None =
     if p_anns:
         tests = []
         for a in p_anns:
-            r = results[a["analysis_id"]]["result"]
+            r = results[a.get("analysis_id")]["result"]
             t_name = (r.get("title") or {}).get(lang, "")
             fam = r.get("family")
             if fam:

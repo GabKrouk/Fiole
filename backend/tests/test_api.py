@@ -62,15 +62,16 @@ def test_full_flow():
     w, h = struct.unpack(">II", png[16:24])
     assert w == round(60 / 25.4 * 300) and h == round(50 / 25.4 * 300)
 
-    # Editing data makes the analysis stale; optimistic version check
+    # Editing data re-runs the analysis automatically; optimistic version check
     content["rows"][0]["cells"]["c1"] = 13.0
     r = c.put(f"/api/projects/{pid}/datasets/{d['id']}", json={"content": content, "version": 1, "change_note": "fix typo"})
     assert r.status_code == 200 and r.json()["version"] == 2
     r = c.put(f"/api/projects/{pid}/datasets/{d['id']}", json={"content": content, "version": 1})
     assert r.status_code == 409 and r.json()["detail"]["current_version"] == 2
     proj = c.get(f"/api/projects/{pid}").json()
-    assert proj["analyses"][0]["status"] == "stale"
-    assert proj["figures"][0]["stale"] is True
+    assert proj["analyses"][0]["status"] == "up_to_date"
+    assert proj["analyses"][0]["last_result"]["dataset_version"] == 2
+    assert proj["figures"][0]["stale"] is False
     assert len(c.get(f"/api/projects/{pid}/datasets/{d['id']}/versions").json()) == 2
 
     # Exports
@@ -201,7 +202,9 @@ def test_duplicate_per_variable_and_layout_export():
     assert not [f for f in proj["figures"] if f["id"] == out[0]["id"]][0]["stale"]
     # back to the original variable restores its saved axis range
     back = c.post(f"/api/projects/{pid}/figures/{out[0]['id']}/duplicate", json={"columns": ["a"]}).json()[0]["config"]
-    assert back["y_max"] == 12 and [a for a in back["annotations"] if a["type"] == "pvalue"][0]["analysis_id"] == an["id"]
+    assert back["y_max"] == 12
+    back_an = [a for a in c.get(f"/api/projects/{pid}").json()["analyses"] if a["id"] == [x for x in back["annotations"] if x["type"] == "pvalue"][0]["analysis_id"]][0]
+    assert back_an["config"]["value_col"] == "a" and back_an["status"] == "up_to_date"
     assert c.post(f"/api/projects/{pid}/figures/{fig['id']}/duplicate", json={"columns": ["zz"]}).status_code == 422
 
     # layout: 2 x 2 page, three panels, letters A B C, exports
@@ -286,3 +289,49 @@ def test_bulk_delete_impact_and_undo():
     v = client("cleanup-viewer@example.org")
     c.post(f"/api/projects/{pid}/members", json={"emails": ["cleanup-viewer@example.org"], "role": "viewer", "notify": False})
     assert v.post(f"/api/projects/{pid}/bulk-delete", json={"figures": [f1["id"]]}).status_code == 403
+
+
+def test_stars_follow_the_figure_without_recompute():
+    c = client("stars@example.org")
+    pid = c.post("/api/projects", json={"name": "Stars"}).json()["id"]
+    rows = [{"id": f"r{i}", "cells": {"g": ["A", "B", "C"][i % 3], "v": 10 + (i % 3) * 5 + (i % 4) * 0.3, "w": 3 + (i % 4)}} for i in range(18)]
+    content = {"columns": [{"id": "g", "name": "G", "type": "text"}, {"id": "v", "name": "V", "type": "numeric"}, {"id": "w", "name": "W", "type": "numeric"}],
+               "rows": rows, "design": {"layout": "wide", "group_columns": []}}
+    d = c.post(f"/api/projects/{pid}/datasets", json={"name": "T", "content": content}).json()
+    cfg = {"type": "box", "group_col": "g", "value_col": "v", "annotations": [{"type": "pvalue", "all": True}], "stars": {"test": "welch", "correction": "holm"}}
+    # preview: stars drawn at once, no analysis needed yet
+    r = c.post(f"/api/projects/{pid}/render", json={"dataset_id": d["id"], "config": cfg}).json()
+    assert r["svg"].count("pvalue-bracket") == 3 and "Holm" in r["caption"]
+    fig = c.post(f"/api/projects/{pid}/figures", json={"dataset_id": d["id"], "name": "F", "config": cfg}).json()
+    # saving creates the figure's own saved analysis
+    u = c.put(f"/api/projects/{pid}/figures/{fig['id']}", json={"config": cfg, "version": fig["version"]}).json()
+    aid = u["stars_analysis_id"]
+    assert aid
+    proj = c.get(f"/api/projects/{pid}").json()
+    an = [a for a in proj["analyses"] if a["id"] == aid][0]
+    assert an["status"] == "up_to_date" and an["config"]["groups"] == ["A", "B", "C"] and an["config"]["figure_id"] == fig["id"]
+    assert [f for f in proj["figures"] if f["id"] == fig["id"]][0]["config"]["annotations"][0]["analysis_id"] == aid
+    # changing the variable, the groups shown and the test: stars follow at once, the same analysis is updated on save
+    cfg2 = {**cfg, "value_col": "w", "group_order": ["A", "C"], "stars": {"test": "mannwhitney", "correction": "bonferroni"},
+            "annotations": [{"type": "pvalue", "all": True, "analysis_id": aid}]}
+    r = c.post(f"/api/projects/{pid}/render", json={"dataset_id": d["id"], "config": cfg2}).json()
+    assert r["svg"].count("pvalue-bracket") == 1 and "Mann" in r["caption"] and not r["warnings"]
+    u = c.put(f"/api/projects/{pid}/figures/{fig['id']}", json={"config": cfg2, "version": u["version"]}).json()
+    assert u["stars_analysis_id"] == aid
+    an = [a for a in c.get(f"/api/projects/{pid}").json()["analyses"] if a["id"] == aid][0]
+    assert an["config"]["value_col"] == "w" and an["config"]["groups"] == ["A", "C"] and an["config"]["test"] == "mannwhitney"
+    assert an["status"] == "up_to_date" and an["name"] == "Étoiles – F – W"
+    # editing the data re-runs it
+    content["rows"][0]["cells"]["w"] = 50
+    c.put(f"/api/projects/{pid}/datasets/{d['id']}", json={"content": content, "version": 1})
+    proj = c.get(f"/api/projects/{pid}").json()
+    an = [a for a in proj["analyses"] if a["id"] == aid][0]
+    assert an["status"] == "up_to_date" and an["last_result"]["dataset_version"] == 2
+    assert not [f for f in proj["figures"] if f["id"] == fig["id"]][0]["stale"]
+    # a plain copy keeps the stars; once edited it gets its own analysis and never changes the original's
+    cp = c.post(f"/api/projects/{pid}/figures/{fig['id']}/duplicate", json={}).json()[0]
+    cfg3 = {**cp["config"], "value_col": "v"}
+    u3 = c.put(f"/api/projects/{pid}/figures/{cp['id']}", json={"config": cfg3, "version": cp["version"]}).json()
+    assert u3["stars_analysis_id"] != aid
+    an = [a for a in c.get(f"/api/projects/{pid}").json()["analyses"] if a["id"] == aid][0]
+    assert an["config"]["value_col"] == "w"

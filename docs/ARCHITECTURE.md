@@ -28,8 +28,14 @@ Project (stable URL /p/<uuid>, owner, members[])
   `{row_id, reason}` on the dataset and are reversible; excluded rows stay in
   the table.
 * An `AnalysisResult` records the dataset version it was computed from. When the
-  dataset's current version differs, the analysis (and any figure showing its
-  p-values) is shown as **stale / à recalculer**.
+  dataset's current version differs, the analysis is shown as **stale / à recalculer**.
+  Saving new data re-runs every analysis already run on that table, so in practice
+  results follow the data.
+* Significance stars on a figure (`{"type": "pvalue", "all": true}`) are never stale:
+  the renderer computes them for the data, Y variable, groups shown and test options
+  on screen (`cfg.stars`). Each figure owns one saved pairwise analysis
+  (`config.figure_id`), which the server updates and re-runs whenever the figure or
+  its data is saved, so the result stays listed under Analyses for traceability.
 * Missing values are stored as `null`. Nothing converts them to zero; each
   analysis reports how many values were missing and dropped.
 
