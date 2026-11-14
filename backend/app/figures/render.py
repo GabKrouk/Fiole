@@ -318,7 +318,11 @@ def p_label(p: float, p_display: str, style: str) -> str:
     if style == "stars":
         return stars(p)
     if p_display.startswith("<"):
-        return f"p {p_display}"
+        m, e = p_display[2:].split("e")
+        return f"p < {m}×10<sup>{int(e)}</sup>".replace("-", "−")
+    if "e" in p_display:
+        m, e = p_display.split("e")
+        return f"p = {float(m):.2g}×10<sup>{int(e)}</sup>".replace("-", "−")
     return f"p = {p_display}"
 
 

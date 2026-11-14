@@ -100,4 +100,5 @@ saved analysis result; manual annotations are labelled as manual.
 
 Sharing, roles beyond owner, access requests, comments, project duplication,
 multi-panel figure composer, data transformations, dose-response figures and
-fit, ANOVA family, report export.
+fit, ANOVA family, full report export. (Data CSV, results CSV and the project
+archive with re-import are implemented.)

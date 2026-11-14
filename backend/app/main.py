@@ -876,3 +876,25 @@ async def import_archive(file: UploadFile = File(...), user: User = Depends(curr
 @app.get("/api/health")
 def health():
     return {"ok": True, "engine": ENGINE}
+
+
+# ------------------------------------------------------------------ frontend (production build)
+
+import os as _os  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+from fastapi.responses import FileResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+_DIST = _Path(_os.environ.get("FIOLE_FRONTEND_DIST", _Path(__file__).resolve().parents[2] / "frontend" / "dist"))
+if (_DIST / "index.html").exists():
+    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def spa(path: str):
+        if path.startswith("api/"):
+            raise HTTPException(404)
+        f = _DIST / path
+        if path and f.is_file():
+            return FileResponse(f)
+        return FileResponse(_DIST / "index.html")
