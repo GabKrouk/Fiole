@@ -17,13 +17,14 @@ const AuthContext = createContext<AuthCtx>({ user: null, setUser: () => {} });
 export const useAuth = () => useContext(AuthContext);
 
 export function Logo({ size = 22 }: { size?: number }) {
-  // Original mark: a flask whose contents form a small bar chart.
+  // Original mark: a blue flask holding a small yellow bar chart, in a circle.
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M9 2.5h6M10 2.5v6.2L4.6 18.6A2 2 0 0 0 6.4 21.5h11.2a2 2 0 0 0 1.8-2.9L14 8.7V2.5" fill="none" stroke="#0d6b6e" strokeWidth="1.7" strokeLinejoin="round" />
-      <rect x="8" y="15" width="2" height="4.5" rx="0.5" fill="#0d6b6e" />
-      <rect x="11" y="12.5" width="2" height="7" rx="0.5" fill="#e09a1a" />
-      <rect x="14" y="16.2" width="2" height="3.3" rx="0.5" fill="#0d6b6e" />
+    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
+      <circle cx="16" cy="16" r="15" fill="#eef3ff" stroke="#2b5fd9" strokeWidth="1.6" />
+      <path d="M12.2 7.3h7.6M13.3 7.3v5.6L8.4 21.6A1.9 1.9 0 0 0 10.1 24.5h11.8a1.9 1.9 0 0 0 1.7-2.9L18.7 12.9V7.3" fill="#d6e2ff" stroke="#2b5fd9" strokeWidth="1.7" strokeLinejoin="round" strokeLinecap="round" />
+      <rect x="11.6" y="18.6" width="2.2" height="4.2" rx="0.6" fill="#f2b705" />
+      <rect x="14.9" y="15.6" width="2.2" height="7.2" rx="0.6" fill="#f2b705" />
+      <rect x="18.2" y="19.8" width="2.2" height="3" rx="0.6" fill="#f2b705" />
     </svg>
   );
 }
