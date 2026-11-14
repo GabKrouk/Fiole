@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Route, Routes, useNavigate, useParams, useLocation } from "react-router-dom";
-import { api, ApiError, ProjectFull, AnalysisType } from "../api";
+import { api, ApiError, ProjectFull, AnalysisType, Dataset } from "../api";
+import { smartDefaults } from "../columns";
 import { TopBar } from "../App";
 import { useI18n } from "../i18n";
 import DataView from "../components/DataView";
@@ -79,21 +80,36 @@ export default function ProjectPage() {
     nav(`${base}/data/${d.id}`);
   }
 
+  function currentDataset() {
+    return project!.datasets.find((d) => loc.pathname.includes(d.id)) ?? project!.datasets[0];
+  }
+
+  async function defaultsFor(id: string) {
+    try {
+      const d = await api.get<Dataset>(`/api/projects/${project!.id}/datasets/${id}`);
+      return smartDefaults(d.content);
+    } catch {
+      return {};
+    }
+  }
+
   async function newAnalysis() {
-    const ds = project!.datasets[0];
+    const ds = currentDataset();
     if (!ds) return;
+    const smart = await defaultsFor(ds.id);
     const a = await api.post<{ id: string }>(`/api/projects/${project!.id}/analyses`, {
-      dataset_id: ds.id, kind: "ttest", name: `${t("analysisN")} ${project!.analyses.length + 1}`, config: { variant: "welch", alternative: "two-sided", ci_level: 0.95 },
+      dataset_id: ds.id, kind: "ttest", name: `${t("analysisN")} ${project!.analyses.length + 1}`, config: { variant: "welch", alternative: "two-sided", ci_level: 0.95, ...smart },
     });
     await reload();
     nav(`${base}/analysis/${a.id}`);
   }
 
   async function newFigure() {
-    const ds = project!.datasets[0];
+    const ds = currentDataset();
     if (!ds) return;
+    const smart = await defaultsFor(ds.id);
     const f = await api.post<{ id: string }>(`/api/projects/${project!.id}/figures`, {
-      dataset_id: ds.id, name: `Figure ${project!.figures.length + 1}`, config: { type: "scatter_groups", width_mm: 80, height_mm: 70 },
+      dataset_id: ds.id, name: `Figure ${project!.figures.length + 1}`, config: { type: "scatter_groups", width_mm: 80, height_mm: 70, ...smart },
     });
     await reload();
     nav(`${base}/figure/${f.id}`);

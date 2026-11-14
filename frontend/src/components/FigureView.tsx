@@ -3,7 +3,8 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api, ApiError, Dataset, FigureEntity } from "../api";
 import { Key, useI18n } from "../i18n";
 import type { ProjectCtx } from "../pages/ProjectPage";
-import { groupNames } from "./AnalysisView";
+import { groupNames, StepButtons } from "./AnalysisView";
+import { factorColumns, levels, numericColumns } from "../columns";
 
 const PALETTES: Record<string, string[]> = {
   okabe_ito: ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#56B4E9", "#CC79A7", "#F0E442", "#000000"],
@@ -72,7 +73,16 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     }, 200);
   }, [cfg, fig?.dataset_id, pid, lang, bg, ctx.project.analyses, ds]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const groups = useMemo(() => groupNames(ds?.content), [ds]);
+  const groups = useMemo(() => {
+    const c = ds?.content;
+    if (!c) return [];
+    const ty = cfg.type ?? "scatter_groups";
+    if (GROUP_TYPES.includes(ty)) return groupNames(c, cfg);
+    const ys: string[] = Array.isArray(cfg.y) ? cfg.y : cfg.y ? [cfg.y] : [];
+    const names = (id: string) => c.columns.find((x) => x.id === id)?.name ?? id;
+    if (cfg.color_by) return ys.length <= 1 ? levels(c, cfg.color_by) : ys.flatMap((y) => levels(c, cfg.color_by).map((l) => `${names(y)} – ${l}`));
+    return ys.map(names);
+  }, [ds, cfg]);
 
   if (!fig) return null;
 
@@ -98,7 +108,8 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
 
   const type: string = cfg.type ?? "scatter_groups";
   const isGroup = GROUP_TYPES.includes(type);
-  const numericCols = ds?.content.columns.filter((c) => c.type === "numeric") ?? [];
+  const numericCols = numericColumns(ds?.content);
+  const factorCols = factorColumns(ds?.content);
   const order: string[] = (cfg.group_order as string[] | undefined)?.filter((g) => groups.includes(g)).concat(groups.filter((g) => !(cfg.group_order || []).includes(g))) ?? groups;
   const palette = PALETTES[cfg.palette ?? "okabe_ito"];
   const w = cfg.width_mm ?? 80;
@@ -140,8 +151,36 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                   {[...GROUP_TYPES, ...XY_TYPES].map((k) => <option key={k} value={k}>{t(k as Key)}</option>)}
                   <option disabled>{t("doseResponse")} — {t("comingSoon")}</option>
                 </select></label>
+              {isGroup && (
+                <>
+                  <label className="field"><span>{t("xAxisGroups")}</span>
+                    <select value={cfg.group_col ?? ""} disabled={!canEdit} onChange={(e) => set({ group_col: e.target.value || null, group_order: null })}>
+                      {cfg.value_col ? <option value="">{t("none")}</option> : <option value="">{t("useTableDesign")}</option>}
+                      {factorCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select></label>
+                  <label className="field"><span>{t("valueColPick")}</span>
+                    <div className="row tight" style={{ flexWrap: "nowrap" }}>
+                      <select className="grow" value={cfg.value_col ?? ""} disabled={!canEdit} onChange={(e) => set({ value_col: e.target.value || null, ...(e.target.value ? {} : { group_col: null }) })}>
+                        <option value="">{t("useTableDesign")}</option>
+                        {numericCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                      {cfg.value_col && <StepButtons cols={numericCols.map((c) => c.id)} value={cfg.value_col} disabled={!canEdit} onChange={(v) => set({ value_col: v })} />}
+                    </div></label>
+                </>
+              )}
               {!isGroup && (
                 <>
+                  <label className="field"><span>{t("colorBy")}</span>
+                    <select value={cfg.color_by ?? ""} disabled={!canEdit} onChange={(e) => set({ color_by: e.target.value || null, group_order: null })}>
+                      <option value="">{t("none")}</option>
+                      {factorCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select></label>
+                  {Array.isArray(cfg.y) && cfg.y.length === 1 && (
+                    <div className="row tight" style={{ marginBottom: 8 }}>
+                      <span className="small-text muted grow">Y : {numericCols.find((c) => c.id === cfg.y[0])?.name}</span>
+                      <StepButtons cols={numericCols.filter((c) => c.id !== cfg.x).map((c) => c.id)} value={cfg.y[0]} disabled={!canEdit} onChange={(v) => set({ y: [v] })} />
+                    </div>
+                  )}
                   <label className="field"><span>{t("xColumn")}</span>
                     <select value={cfg.x ?? ""} disabled={!canEdit} onChange={(e) => set({ x: e.target.value })}><option value="">—</option>{numericCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
                   <div className="field"><span>{t("yColumns")}</span>
@@ -175,7 +214,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
               </div>
             </div>
           </details>
-          {isGroup && (
+          {(isGroup || groups.length > 1) && (
             <details open>
               <summary>{t("groupsOrder")}</summary>
               <div>
@@ -189,7 +228,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                   </div>
                 ))}
                 {cfg.colors && Object.keys(cfg.colors).length > 0 && <button className="small" onClick={() => set({ colors: {} })}>↺ {t("palette")}</button>}
-                {ds?.content.design?.subject && <label className="check" style={{ marginTop: 8 }}><input type="checkbox" disabled={!canEdit} checked={!!cfg.average_technical} onChange={(e) => set({ average_technical: e.target.checked })} /> {t("avgTech")}</label>}
+                {isGroup && ds?.content.design?.subject && <label className="check" style={{ marginTop: 8 }}><input type="checkbox" disabled={!canEdit} checked={!!cfg.average_technical} onChange={(e) => set({ average_technical: e.target.checked })} /> {t("avgTech")}</label>}
               </div>
             </details>
           )}

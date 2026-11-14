@@ -13,7 +13,7 @@ from xml.sax.saxutils import escape
 
 import numpy as np
 
-from ..data import DataError, Group, average_technical, col_by_id, excluded_row_ids, extract_groups
+from ..data import DataError, Group, _label, average_technical, col_by_id, design_for, excluded_row_ids, extract_groups
 from ..stats.core import describe
 
 MM = 72 / 25.4  # points per mm
@@ -333,6 +333,18 @@ def render_figure(content: dict, cfg_in: dict, results: dict[str, dict] | None =
     """
     cfg = merged_config(cfg_in)
     results = results or {}
+    if cfg["type"] in ("scatter_groups", "bar", "box", "violin"):
+        if not cfg["y_label"] and cfg.get("value_col") and col_by_id(content, cfg["value_col"]):
+            cfg["y_label"] = col_by_id(content, cfg["value_col"])["name"]
+        if not cfg["x_label"] and cfg.get("group_col") and col_by_id(content, cfg["group_col"]):
+            cfg["x_label"] = col_by_id(content, cfg["group_col"])["name"]
+    else:
+        ys = cfg.get("y") or []
+        ys = [ys] if isinstance(ys, str) else ys
+        if not cfg["x_label"] and col_by_id(content, cfg.get("x")):
+            cfg["x_label"] = col_by_id(content, cfg["x"])["name"]
+        if not cfg["y_label"] and len(ys) == 1 and col_by_id(content, ys[0]):
+            cfg["y_label"] = col_by_id(content, ys[0])["name"]
     W, H = cfg["width_mm"] * MM, cfg["height_mm"] * MM
     svg = SVG(W, H, cfg)
     fs = cfg["font_size_pt"]
@@ -340,7 +352,7 @@ def render_figure(content: dict, cfg_in: dict, results: dict[str, dict] | None =
     t = cfg["type"]
 
     if t in ("scatter_groups", "bar", "box", "violin"):
-        groups = extract_groups(content)
+        groups = extract_groups(content, design_for(content, cfg))
         if cfg.get("average_technical"):
             groups = {k: average_technical(g) for k, g in groups.items()}
         order = cfg.get("group_order") or list(groups.keys())
@@ -571,11 +583,12 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
         raise _err("Choose an X column and at least one Y column.", "Choisissez une colonne X et au moins une colonne Y.")
     excl = excluded_row_ids(content)
     series = []
+    color_by = cfg.get("color_by") if col_by_id(content, cfg.get("color_by")) else None
     for yc in ycols:
         col = col_by_id(content, yc)
         if col is None:
             continue
-        pts = []
+        by_level: dict[str, list] = {}
         for row in content["rows"]:
             if row["id"] in excl:
                 continue
@@ -583,8 +596,18 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
             if isinstance(x, (int, float)) and isinstance(y, (int, float)) and x is not None and y is not None:
                 if (cfg["x_scale"] == "log10" and x <= 0) or (cfg["y_scale"] == "log10" and y <= 0):
                     continue
-                pts.append((float(x), float(y)))
-        series.append((col["name"], pts))
+                if color_by:
+                    lvl = _label(row["cells"].get(color_by))
+                    if lvl is None:
+                        continue
+                    key = lvl if len(ycols) == 1 else f"{col['name']} – {lvl}"
+                else:
+                    key = col["name"]
+                by_level.setdefault(key, []).append((float(x), float(y)))
+        series.extend(by_level.items())
+    order = cfg.get("group_order")
+    if order:
+        series.sort(key=lambda s: order.index(s[0]) if s[0] in order else len(order))
     allx = [p[0] for _, s in series for p in s]
     ally = [p[1] for _, s in series for p in s]
     if not allx:

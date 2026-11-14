@@ -4,9 +4,14 @@ import { Analysis, api, ApiError, Dataset, TableContent } from "../api";
 import { useI18n } from "../i18n";
 import type { ProjectCtx } from "../pages/ProjectPage";
 import ResultView from "./ResultView";
+import { factorColumns, levels, numericColumns } from "../columns";
 
-export function groupNames(c: TableContent | undefined): string[] {
+export function groupNames(c: TableContent | undefined, cfg?: Record<string, any>): string[] {
   if (!c) return [];
+  if (cfg?.value_col) {
+    if (cfg.group_col) return levels(c, cfg.group_col);
+    return [c.columns.find((x) => x.id === cfg.value_col)?.name ?? ""];
+  }
   const d = c.design || { layout: "wide" };
   if (d.layout === "wide") {
     const ids = d.group_columns || c.columns.filter((x) => x.type === "numeric" && x.id !== d.subject).map((x) => x.id);
@@ -51,7 +56,7 @@ export default function AnalysisView({ ctx }: { ctx: ProjectCtx }) {
     api.get<Dataset>(`/api/projects/${pid}/datasets/${a.dataset_id}`).then(setDs);
   }, [pid, a?.dataset_id, ctx.project.datasets]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const groups = useMemo(() => groupNames(ds?.content), [ds]);
+  const groups = useMemo(() => groupNames(ds?.content, a?.config), [ds, a?.config]);
 
   if (!a) return null;
   const spec = ctx.types.find((x) => x.kind === a.kind);
@@ -172,6 +177,22 @@ export default function AnalysisView({ ctx }: { ctx: ProjectCtx }) {
                 <label className="check" style={{ marginTop: 18 }}><input type="checkbox" disabled={!canEdit || !hasSubject} checked={!!cfg.average_technical} onChange={(e) => setCfg({ average_technical: e.target.checked })} /> <span>{t("avgTech")}<br /><span className="small-text muted">{t("avgTechHelp")}</span></span></label>
               </div>
             </div>
+            <div className="grid2">
+              <label className="field"><span>{t("groupColPick")}</span>
+                <select value={cfg.group_col ?? ""} disabled={!canEdit} onChange={(e) => setCfg({ group_col: e.target.value || null, groups: undefined })}>
+                  {!cfg.value_col && <option value="">{t("useTableDesign")}</option>}
+                  {cfg.value_col && <option value="">{t("none")}</option>}
+                  {factorColumns(ds?.content).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select></label>
+              <label className="field"><span>{t("valueColPick")}</span>
+                <div className="row tight" style={{ flexWrap: "nowrap" }}>
+                  <select className="grow" value={cfg.value_col ?? ""} disabled={!canEdit} onChange={(e) => setCfg({ value_col: e.target.value || null, ...(e.target.value ? {} : { group_col: null }), groups: cfg.group_col ? cfg.groups : undefined })}>
+                    <option value="">{t("useTableDesign")}</option>
+                    {numericColumns(ds?.content).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                  {cfg.value_col && <StepButtons cols={numericColumns(ds?.content).map((c) => c.id)} value={cfg.value_col} disabled={!canEdit} onChange={(v) => setCfg({ value_col: v })} />}
+                </div></label>
+            </div>
             <div className="field"><span>{t("groupsToCompare")}</span>
               {a.kind === "descriptive" ? (
                 <div className="row">{groups.map((g) => (
@@ -214,6 +235,16 @@ export default function AnalysisView({ ctx }: { ctx: ProjectCtx }) {
       </div>
 
       {a.last_result && <ResultView result={a.last_result.result} meta={a.last_result} stale={a.status === "stale"} />}
+    </>
+  );
+}
+
+export function StepButtons({ cols, value, onChange, disabled }: { cols: string[]; value: string; onChange: (v: string) => void; disabled?: boolean }) {
+  const i = cols.indexOf(value);
+  return (
+    <>
+      <button type="button" className="small" disabled={disabled || i <= 0} aria-label="previous" onClick={() => onChange(cols[i - 1])}>◀</button>
+      <button type="button" className="small" disabled={disabled || i < 0 || i >= cols.length - 1} aria-label="next" onClick={() => onChange(cols[i + 1])}>▶</button>
     </>
   );
 }

@@ -272,6 +272,11 @@ const D = {
     en: "1. Import your data · 2. Run an analysis · 3. Build and export a figure",
   },
   error: { fr: "Erreur", en: "Error" },
+  groupColPick: { fr: "Groupes = modalités de la colonne", en: "Groups = levels of column" },
+  valueColPick: { fr: "Valeurs (Y)", en: "Values (Y)" },
+  useTableDesign: { fr: "— selon le plan du tableau —", en: "— from the table design —" },
+  colorBy: { fr: "Couleur / séparer selon", en: "Colour / split by" },
+  xAxisGroups: { fr: "Axe X : groupes = modalités de", en: "X axis: groups = levels of" },
   analysisN: { fr: "Analyse", en: "Analysis" },
   ci: { fr: "IC", en: "CI" },
 } satisfies Record<string, Bi>;

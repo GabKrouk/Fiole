@@ -16,7 +16,7 @@ import scipy
 import statsmodels
 from scipy import stats
 
-from ..data import DataError, Group, average_technical, extract_groups, extract_xy, col_by_id, pair_groups
+from ..data import DataError, Group, average_technical, design_for, extract_groups, extract_xy, col_by_id, pair_groups
 from ..i18n import msg
 from .core import brown_forsythe, clean, describe, fmt, format_p, nct_ci, shapiro
 
@@ -58,7 +58,7 @@ def _group_summary(g: Group, ci_level: float) -> dict:
 
 
 def _prepare_two_groups(content: dict, config: dict, res: dict) -> tuple[Group, Group]:
-    groups = extract_groups(content)
+    groups = extract_groups(content, design_for(content, config))
     names = config.get("groups") or list(groups.keys())[:2]
     if len(names) != 2:
         raise AnalysisError([msg("need_two_groups")])
@@ -129,7 +129,7 @@ def _cohen_d_independent(a: np.ndarray, b: np.ndarray, level: float) -> dict:
 def run_descriptive(content: dict, config: dict) -> dict:
     res = _result("descriptive", ("Descriptive statistics", "Statistiques descriptives"))
     level = float(config.get("ci_level", 0.95))
-    groups = extract_groups(content)
+    groups = extract_groups(content, design_for(content, config))
     names = config.get("groups") or list(groups.keys())
     for n in names:
         if n not in groups:

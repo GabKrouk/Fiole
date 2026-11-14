@@ -51,10 +51,12 @@ export default function ImportDialog({ projectId, onClose, onCreated }: { projec
     if (!preview) return;
     const numeric = preview.columns.filter((c) => c.type === "numeric").map((c) => c.id);
     const text = preview.columns.filter((c) => c.type === "text").map((c) => c.id);
+    // A text column with repeated values (e.g. Genotype: Col, Col, tga1…) is a factor: use the long layout.
+    const factorFirst = layout === "long" || text.some((id) => new Set(preview.rows.map((r) => r.cells[id])).size < preview.rows.length);
     const design =
-      layout === "wide"
+      layout === "wide" && !(factorFirst && numeric.length)
         ? { layout: "wide", group_columns: numeric, subject: text[0] ?? null }
-        : { layout: "long", group: text[0] ?? null, value: numeric[0] ?? null, subject: text[1] ?? null };
+        : { layout: "long", group: text.find((id) => new Set(preview.rows.map((r) => r.cells[id])).size < preview.rows.length) ?? text[0] ?? null, value: numeric[0] ?? null, subject: null };
     const d = await api.post<{ id: string }>(`/api/projects/${projectId}/datasets`, {
       name: name || t("table"),
       upload_id: preview.upload_id,

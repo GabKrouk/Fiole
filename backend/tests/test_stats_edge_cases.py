@@ -79,3 +79,34 @@ def test_method_text_bilingual():
     r = run_analysis("ttest", wide([1.0, 2.0, 3.0, 4.0], [2.0, 3.5, 4.0, 6.0]), {"variant": "welch", "experimental_unit": "mouse"})
     assert "Welch" in r["method_text"]["en"] and "Welch" in r["method_text"]["fr"]
     assert "mouse" in r["method_text"]["en"]
+
+
+def _genotype_table():
+    rows = [("Col", 6.76, 0.26), ("Col", 7.18, 0.69), ("Col", 6.95, 0.46), ("tga1", 7.64, 1.12), ("tga1", 7.50, 1.03),
+            ("tga1", 7.13, 0.62), ("tga4", 7.08, 0.57), ("tga4", 8.13, 1.66), ("tga4", 7.19, 0.74)]
+    return {
+        "columns": [{"id": "g", "name": "Genotype", "type": "text"}, {"id": "a", "name": "pod", "type": "numeric"},
+                    {"id": "b", "name": "Fresh weight", "type": "numeric"}],
+        "rows": [{"id": f"r{i}", "cells": {"g": g, "a": a, "b": b}} for i, (g, a, b) in enumerate(rows)],
+        # deliberately "wrong" saved layout: the column picks must override it
+        "design": {"layout": "wide", "group_columns": ["a", "b"], "subject": "g"},
+        "exclusions": [],
+    }
+
+
+def test_column_driven_groups_override_layout():
+    c = _genotype_table()
+    r = run_analysis("descriptive", c, {"group_col": "g", "value_col": "b"})
+    assert [g["name"] for g in r["groups"]] == ["Col", "tga1", "tga4"]
+    assert [g["n"] for g in r["groups"]] == [3, 3, 3]
+    r = run_analysis("ttest", c, {"group_col": "g", "value_col": "a", "groups": ["Col", "tga4"], "variant": "welch"})
+    assert r["status"] == "ok" and r["groups"][1]["name"] == "tga4"
+
+
+def test_figure_column_driven_and_color_by():
+    from app.figures.render import render_figure
+    c = _genotype_table()
+    out = render_figure(c, {"type": "box", "group_col": "g", "value_col": "b"})
+    assert ">tga1<" in out["svg"] and ">Fresh weight<" in out["svg"] and ">Genotype<" in out["svg"]
+    out = render_figure(c, {"type": "xy", "x": "a", "y": ["b"], "color_by": "g"})
+    assert out["svg"].count("<path") >= 3 and ">tga4<" in out["svg"]  # one regression line + legend entry per genotype

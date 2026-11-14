@@ -71,6 +71,22 @@ def _label(v) -> str | None:
     return str(v)
 
 
+def design_for(content: dict, config: dict | None) -> dict:
+    """Column-driven override: if a figure/analysis picks a group (factor) column and a
+    value column, use them instead of the table's saved layout."""
+    base = dict(content.get("design") or {})
+    config = config or {}
+    if config.get("value_col"):
+        if config.get("group_col"):
+            out = {"layout": "long", "group": config["group_col"], "value": config["value_col"],
+                   "subject": config.get("subject_col") or (base.get("subject") if base.get("subject") != config["group_col"] else None)}
+        else:
+            # no factor: a single group made of the whole column
+            out = {"layout": "wide", "group_columns": [config["value_col"]], "subject": config.get("subject_col") or base.get("subject")}
+        return out
+    return base
+
+
 def extract_groups(content: dict, design: dict | None = None) -> "OrderedDict[str, Group]":
     design = design or content.get("design") or {}
     layout = design.get("layout", "wide")

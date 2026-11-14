@@ -113,7 +113,7 @@ export default function DataView({ ctx }: { ctx: ProjectCtx }) {
       if (d.group) m.set(d.group, t("group"));
       if (d.value) m.set(d.value, t("valueCol").split(" ").pop() || "");
     }
-    if (d.subject) m.set(d.subject, "ID");
+    if (d.subject) m.set(d.subject, lang === "fr" ? "sujet" : "subject");
     if (d.technical) m.set(d.technical, "tech");
     if (d.time) m.set(d.time, t("timeCol"));
     if (d.condition) m.set(d.condition, t("conditionCol"));
@@ -158,6 +158,15 @@ export default function DataView({ ctx }: { ctx: ProjectCtx }) {
         const col = c.columns[colIdx + j];
         c.rows[rowIdx + i].cells[col.id] = parseCell(s, col.type);
       }));
+      // Infer column types: a numeric column whose values are all text (e.g. genotype names) becomes text.
+      for (let j = 0; j < width; j++) {
+        const col = c.columns[colIdx + j];
+        const vals = c.rows.map((r) => r.cells[col.id]).filter((v) => v !== null && v !== undefined);
+        if (col.type === "numeric" && vals.length && vals.every((v) => typeof v === "string")) {
+          col.type = "text";
+          if (c.design.group_columns) c.design.group_columns = c.design.group_columns.filter((x) => x !== col.id);
+        }
+      }
       // a pasted text value in a numeric column switches the column to text only if no value is numeric
       return c;
     });
