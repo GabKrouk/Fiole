@@ -504,6 +504,9 @@ def update_dataset(project_id: str, dataset_id: str, body: DatasetUpdate, user: 
     d.updated_by = user.id
     db.add(DatasetVersion(dataset_id=d.id, version=d.version, content=d.content, change_note=body.change_note[:500], created_by=user.id))
     audit(db, user, p.id, "dataset.update", "dataset", d.id, version=d.version, note=body.change_note[:200])
+    db.flush()
+    if body.content is not None:
+        _refresh_dataset_analyses(db, user, d)
     touch(p)
     db.commit()
     return _dataset_meta(d)
@@ -733,28 +736,212 @@ class RenderIn(BaseModel):
     lang: Literal["en", "fr"] = "en"
 
 
-def _results_for(db: Session, project_id: str, cfg: dict) -> dict:
+STAR_OPTS = ("mode", "control", "test", "correction")
+STAR_DEFAULTS = {"mode": "all", "test": "welch", "correction": "holm"}
+
+
+def _stars_config(content: dict, cfg: dict, base: dict | None) -> dict | None:
+    """Pairwise-analysis settings the figure's automatic stars need right now: the groups shown,
+    the Y variable, and the test options saved in the figure (falling back to the analysis's own)."""
+    if (cfg.get("type") or "scatter_groups") not in GROUP_TYPES:
+        return None
+    from .data import DataError, design_for, extract_groups
+
+    try:
+        groups = extract_groups(content, design_for(content, cfg))
+    except (DataError, KeyError, TypeError):
+        return None
+    order = cfg.get("group_order") or list(groups.keys())
+    names = [n for n in order if n in groups]
+    base = dict(base or {})
+    opts = {**STAR_DEFAULTS,
+            **{k: base[k] for k in STAR_OPTS if base.get(k) not in (None, "")},
+            **{k: v for k, v in (cfg.get("stars") or {}).items() if k in STAR_OPTS and v not in (None, "")}}
+    if opts.get("mode") != "control":
+        opts.pop("control", None)
+    elif opts.get("control") not in names:
+        opts["control"] = names[0] if names else None
+    return {**{k: v for k, v in base.items() if k not in STAR_OPTS}, **opts, "group_col": cfg.get("group_col") or None,
+            "value_col": cfg.get("value_col") or None, "average_technical": bool(cfg.get("average_technical")), "groups": names}
+
+
+_STARS_CACHE: dict[str, dict] = {}
+
+
+def _pairwise_now(d: Dataset, config: dict) -> dict:
+    """Stars for the preview, computed for the data and settings on screen (small in-process cache:
+    previews re-render on every edit, and the statistics only change when data or settings do)."""
+    key = json.dumps([d.id, d.version, config], sort_keys=True, default=str)
+    hit = _STARS_CACHE.get(key)
+    if hit is None:
+        hit = run_analysis("pairwise", d.content, config)
+        if len(_STARS_CACHE) > 200:
+            _STARS_CACHE.clear()
+        _STARS_CACHE[key] = hit
+    return hit
+
+
+def _is_stale(db: Session, a: Analysis, last: AnalysisResult | None) -> bool:
+    if last is None:
+        return True
+    d = db.get(Dataset, a.dataset_id)
+    return last.dataset_version != d.version or last.analysis_version != a.version
+
+
+def _results_for(db: Session, project_id: str, cfg: dict, d: Dataset) -> dict:
+    """Results behind the figure's p-value annotations. They are always current: automatic stars are
+    computed for the data and settings on screen, and an analysis behind a p-value that is out of date
+    is re-run in memory (the saved copy is refreshed when an editor saves)."""
     out = {}
     for ann in cfg.get("annotations") or []:
         aid = ann.get("analysis_id")
-        if ann.get("type") != "pvalue" or not aid or aid in out:
+        if ann.get("type") != "pvalue" or aid in out:
             continue
-        a = db.get(Analysis, aid)
-        if a is None or a.project_id != project_id:
+        a = db.get(Analysis, aid) if aid else None
+        if a is not None and a.project_id != project_id:
+            a = None
+        if ann.get("all"):
+            desired = _stars_config(d.content, cfg, {**(a.config or {})} if a else None)
+            if desired is None:
+                continue
+            last = _last_result(db, a.id) if a else None
+            if a and last and a.dataset_id == d.id and {**a.config, "figure_id": None} == {**desired, "figure_id": None} and not _is_stale(db, a, last):
+                res = last.result
+            else:
+                res = _pairwise_now(d, desired)
+            out[aid] = {"result": res, "stale": False, "value_col": cfg.get("value_col"), "dataset_id": d.id}
+            continue
+        if a is None:
             continue
         last = _last_result(db, aid)
         if last is None:
             continue
-        d = db.get(Dataset, a.dataset_id)
-        out[aid] = {"result": last.result, "stale": last.dataset_version != d.version or last.analysis_version != a.version,
-                    "value_col": (a.config or {}).get("value_col"), "dataset_id": a.dataset_id}
+        res = last.result
+        if _is_stale(db, a, last):
+            ad = db.get(Dataset, a.dataset_id)
+            res = run_analysis(a.kind, ad.content, a.config)
+            res["dataset"] = {"id": ad.id, "name": ad.name, "version": ad.version}
+        out[aid] = {"result": res, "stale": False, "value_col": (a.config or {}).get("value_col"), "dataset_id": a.dataset_id}
     return out
+
+
+def _ensure_run(db: Session, user: User, a: Analysis) -> None:
+    """Save a fresh result if the last one is missing or out of date."""
+    last = _last_result(db, a.id)
+    if not _is_stale(db, a, last):
+        return
+    d = db.get(Dataset, a.dataset_id)
+    res = run_analysis(a.kind, d.content, a.config)
+    res["dataset"] = {"id": d.id, "name": d.name, "version": d.version}
+    db.add(AnalysisResult(analysis_id=a.id, analysis_version=a.version, dataset_version=d.version, result=res,
+                          engine_version=ENGINE, created_by=user.id))
+    db.flush()
+
+
+def _refs(cfg: dict) -> set[str]:
+    ids = {a.get("analysis_id") for a in (cfg or {}).get("annotations") or [] if a.get("type") == "pvalue"}
+    for v in ((cfg or {}).get("per_y") or {}).values():
+        ids |= {a.get("analysis_id") for a in (v or {}).get("annotations") or [] if a.get("type") == "pvalue"}
+    return {i for i in ids if i}
+
+
+def _owns(db: Session, f: Figure, a: Analysis) -> bool:
+    """Each figure has its own stars analysis. Older ones carry no owner: the oldest figure using it gets it."""
+    owner = (a.config or {}).get("figure_id")
+    if owner:
+        return owner == f.id
+    users = [x for x in db.execute(select(Figure).where(Figure.project_id == f.project_id)).scalars() if a.id in _refs(x.config)]
+    users.sort(key=lambda x: (x.created_at, x.id))
+    return not users or users[0].id == f.id
+
+
+def _stars_name(db: Session, user: User, f: Figure, d: Dataset, value_col: str | None) -> str:
+    col = next((c["name"] for c in d.content.get("columns", []) if c["id"] == value_col), "") if value_col else ""
+    name = f"{'Étoiles' if user.locale == 'fr' else 'Stars'} – {f.name}"
+    if col and not f.name.endswith(col):
+        name += f" – {col}"
+    return name[:300]
+
+
+def _sync_figure_stars(db: Session, user: User, f: Figure) -> str | None:
+    """Keep the saved analyses behind a figure's stars and p-values in step with the figure and its data,
+    so nobody ever has to press "recompute". Returns the id of the figure's automatic stars analysis."""
+    cfg = f.config or {}
+    anns = list(cfg.get("annotations") or [])
+    d = db.get(Dataset, f.dataset_id)
+    if d is None:
+        return None
+    stars_id, changed = None, False
+    for i, ann in enumerate(anns):
+        if ann.get("type") != "pvalue":
+            continue
+        a = db.get(Analysis, ann["analysis_id"]) if ann.get("analysis_id") else None
+        if a is not None and a.project_id != f.project_id:
+            a = None
+        if not ann.get("all"):
+            if a is not None:
+                _ensure_run(db, user, a)
+            continue
+        if a is None or not _owns(db, f, a):
+            a = next((x for x in db.execute(select(Analysis).where(Analysis.project_id == f.project_id, Analysis.kind == "pairwise")).scalars()
+                      if (x.config or {}).get("figure_id") == f.id), None)
+        desired = _stars_config(d.content, cfg, a.config if a else None)
+        if desired is None:
+            continue
+        desired["figure_id"] = f.id
+        if a is None:
+            a = Analysis(project_id=f.project_id, dataset_id=d.id, kind="pairwise", name=_stars_name(db, user, f, d, desired["value_col"]), config=desired)
+            db.add(a)
+            db.flush()
+        elif a.config != desired or a.dataset_id != d.id:
+            if (a.config or {}).get("value_col") != desired["value_col"] or a.dataset_id != d.id:
+                a.name = _stars_name(db, user, f, d, desired["value_col"])
+            a.config = desired
+            a.dataset_id = d.id
+            a.version += 1
+            a.updated_at = utcnow()
+            db.flush()
+        _ensure_run(db, user, a)
+        stars_id = a.id
+        if ann.get("analysis_id") != a.id:
+            anns[i] = {**ann, "analysis_id": a.id}
+            changed = True
+    if changed:
+        f.config = {**cfg, "annotations": anns}
+    return stars_id
+
+
+def _safe_sync(db: Session, user: User, f: Figure) -> str | None:
+    """Stars bookkeeping must never block saving the figure or the data."""
+    try:
+        with db.begin_nested():
+            return _sync_figure_stars(db, user, f)
+    except Exception:  # pragma: no cover - logged, the preview still computes stars itself
+        import logging
+
+        logging.getLogger("fiole").exception("stars sync failed for figure %s", f.id)
+        return None
+
+
+def _refresh_dataset_analyses(db: Session, user: User, d: Dataset) -> None:
+    """After a data change: the figures' stars follow the new data, and every analysis already run on
+    this table is re-run, so results are never left behind the data."""
+    for f in db.execute(select(Figure).where(Figure.dataset_id == d.id)).scalars():
+        if any(a.get("type") == "pvalue" for a in (f.config or {}).get("annotations") or []):
+            _safe_sync(db, user, f)
+    for a in db.execute(select(Analysis).where(Analysis.dataset_id == d.id)).scalars():
+        if _last_result(db, a.id) is not None:
+            try:
+                with db.begin_nested():
+                    _ensure_run(db, user, a)
+            except Exception:  # pragma: no cover
+                pass
 
 
 def _render(db: Session, project_id: str, dataset_id: str, cfg: dict, lang: str) -> dict:
     d = _get_dataset(db, project_id, dataset_id)
     try:
-        return render_figure(d.content, cfg, _results_for(db, project_id, cfg), lang)
+        return render_figure(d.content, cfg, _results_for(db, project_id, cfg, d), lang)
     except FigureError as e:
         raise HTTPException(422, detail={"code": "figure_error", "message": e.message})
     except Exception as e:  # data problems
@@ -797,11 +984,12 @@ def update_figure(project_id: str, figure_id: str, body: FigureUpdate, user: Use
         f.kind = body.config.get("type", f.kind)
     if body.dataset_id is not None:
         f.dataset_id = _get_dataset(db, project_id, body.dataset_id).id
+    stars_id = _safe_sync(db, user, f)
     f.version += 1
     f.updated_at = utcnow()
     touch(p)
     db.commit()
-    return {"id": f.id, "version": f.version}
+    return {"id": f.id, "version": f.version, "stars_analysis_id": stars_id}
 
 
 @app.delete("/api/projects/{project_id}/figures/{figure_id}")
@@ -897,6 +1085,9 @@ def _retarget(db: Session, user: User, p: Project, src: Figure, cfg: dict, col: 
         for a in anns:
             if a.get("type") != "pvalue" or not a.get("analysis_id"):
                 continue
+            if a.get("all"):
+                stars.append(dict(a))  # automatic stars: the new figure gets its own analysis just below
+                continue
             aid = a["analysis_id"]
             if aid not in done:
                 an = db.get(Analysis, aid)
@@ -945,6 +1136,8 @@ def duplicate_figure(project_id: str, figure_id: str, body: DuplicateIn, user: U
     for f in made:
         db.add(f)
         db.flush()
+        if body.columns:
+            _safe_sync(db, user, f)
         audit(db, user, p.id, "figure.duplicate", "figure", f.id, source=src.id)
     touch(p)
     db.commit()
@@ -1007,7 +1200,8 @@ def _render_layout(db: Session, project_id: str, cfg: dict, lang: str) -> dict:
         if cfg["background"] == "transparent":
             fcfg["background"] = "transparent"
         try:
-            out = render_figure(_get_dataset(db, project_id, f.dataset_id).content, fcfg, _results_for(db, project_id, fcfg), lang)
+            fd = _get_dataset(db, project_id, f.dataset_id)
+            out = render_figure(fd.content, fcfg, _results_for(db, project_id, fcfg, fd), lang)
             placed.append({"cell": c, "svg": out["svg"]})
             warnings += [{"en": f"{f.name}: {w['en']}", "fr": f"{f.name} : {w['fr']}"} for w in out["warnings"]]
         except Exception as e:  # one broken panel never blanks the page

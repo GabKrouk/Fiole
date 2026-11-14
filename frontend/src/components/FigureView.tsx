@@ -11,7 +11,6 @@ import StyleMenu from "./StyleMenu";
 import ResizeBox from "./ResizeBox";
 import Modal from "./Modal";
 import Inspector, { figurePFormat, PFormat, StarThresholds } from "./Inspector";
-import type { Analysis } from "../api";
 
 // Quick styles. "Classic" and "Poster" scale text, lines and points with the figure size (reference 80 × 70 mm)
 // so that a style looks right on a small panel as on a full-width figure; journal styles keep absolute sizes.
@@ -63,10 +62,10 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   const [dpi, setDpi] = useState(300);
   const [bg, setBg] = useState<"white" | "transparent">("white");
   const [selected, setSelected] = useState<Selection | null>(null);
-  const [starsBusy, setStarsBusy] = useState(false);
+  const [rendering, setRendering] = useState(false);
+  const renderCache = useRef(new Map<string, { svg: string; caption: string; warnings: { en: string; fr: string }[] }>());
   const [multiYState, setMultiY] = useState<boolean | null>(null);
   const [perVarOpen, setPerVarOpen] = useState(false);
-  const [starsOpts, setStarsOpts] = useState<{ mode: string; control: string; test: string; correction: string }>({ mode: "all", control: "", test: "welch", correction: "holm" });
   const undoStack = useRef<Cfg[]>([]);
   const redoStack = useRef<Cfg[]>([]);
   const lastPush = useRef(0);
@@ -88,30 +87,56 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [figureId, ctx.project]);
 
+  const dsVersion = ctx.project.datasets.find((d) => d.id === fig?.dataset_id)?.version ?? 0;
   useEffect(() => {
     if (!fig) return;
     api.get<Dataset>(`/api/projects/${pid}/datasets/${fig.dataset_id}`).then(setDs);
-  }, [pid, fig?.dataset_id, ctx.project.datasets]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pid, fig?.dataset_id, dsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // live preview (same renderer as exports)
+  // p-values linked by hand to saved analyses: re-render only when one of them really changes
+  const linkedKey = useMemo(() => {
+    const ids = new Set(((cfg.annotations ?? []) as Cfg[]).filter((a) => a.type === "pvalue" && !a.all).map((a) => a.analysis_id));
+    return ctx.project.analyses.filter((a) => ids.has(a.id)).map((a) => `${a.id}:${a.version}:${a.last_result?.id ?? ""}`).join("|");
+  }, [cfg.annotations, ctx.project.analyses]);
+
+  // Live preview (same renderer as exports). Stars are computed by the server for what is on screen, so
+  // they follow every change by themselves. Renders already seen are reused at once (undo, redo, toggles).
   useEffect(() => {
     if (!fig) return;
+    const body = { dataset_id: fig.dataset_id, config: { ...cfg, background: bg }, lang };
+    const key = JSON.stringify(body) + `#${dsVersion}#${linkedKey}`;
+    const show = (r: { svg: string; caption: string; warnings: { en: string; fr: string }[] }) => {
+      setSvg(r.svg);
+      setCaption(r.caption);
+      setWarnings(r.warnings);
+      setRenderErr("");
+    };
     window.clearTimeout(renderTimer.current);
+    const hit = renderCache.current.get(key);
+    if (hit) {
+      ++renderSeq.current;
+      setRendering(false);
+      show(hit);
+      return;
+    }
     renderTimer.current = window.setTimeout(async () => {
       const seq = ++renderSeq.current;
+      setRendering(true);
       try {
-        const r = await api.post<{ svg: string; caption: string; warnings: { en: string; fr: string }[] }>(`/api/projects/${pid}/render`, { dataset_id: fig.dataset_id, config: { ...cfg, background: bg }, lang });
+        const r = await api.post<{ svg: string; caption: string; warnings: { en: string; fr: string }[] }>(`/api/projects/${pid}/render`, body);
+        const cache = renderCache.current;
+        cache.set(key, r);
+        if (cache.size > 40) cache.delete(cache.keys().next().value!);
         if (seq !== renderSeq.current) return; // a newer render is on its way: never show an outdated figure
-        setSvg(r.svg);
-        setCaption(r.caption);
-        setWarnings(r.warnings);
-        setRenderErr("");
+        show(r);
       } catch (e) {
         if (seq !== renderSeq.current) return;
         setRenderErr(e instanceof ApiError ? (e.detail?.message ? L(e.detail.message) : JSON.stringify(e.detail)) : String(e));
+      } finally {
+        if (seq === renderSeq.current) setRendering(false);
       }
-    }, 200);
-  }, [cfg, fig?.dataset_id, pid, lang, bg, ctx.project.analyses, ds]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, 90);
+  }, [cfg, fig?.dataset_id, pid, lang, bg, dsVersion, linkedKey, ds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const groups = useMemo(() => {
     const c = ds?.content;
@@ -145,11 +170,24 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     if (!job) return;
     pendingSave.current = null;
     try {
-      const r = await api.put<{ version: number }>(`/api/projects/${pid}/figures/${fig!.id}`, { config: job.cfg, version: versionRef.current, ...job.extra });
+      const r = await api.put<{ version: number; stars_analysis_id?: string | null }>(`/api/projects/${pid}/figures/${fig!.id}`, { config: job.cfg, version: versionRef.current, ...job.extra });
       versionRef.current = r.version;
       setSaveErr("");
       if (!pendingSave.current) setSaved(true);
-      if (job.extra.dataset_id || job.extra.name) ctx.reload();
+      // the server keeps one saved stars analysis per figure, up to date: point the figure at it
+      const sid = r.stars_analysis_id;
+      const adopt = (c: Cfg): Cfg => (!sid || !((c.annotations ?? []) as Cfg[]).some((a) => a.type === "pvalue" && a.all && a.analysis_id !== sid)) ? c
+        : { ...c, annotations: (c.annotations as Cfg[]).map((a) => (a.type === "pvalue" && a.all ? { ...a, analysis_id: sid } : a)) };
+      const isNewStars = !!sid && adopt(job.cfg) !== job.cfg;
+      if (isNewStars) {
+        setCfgState((c) => adopt(c));
+        const next = pendingSave.current as { cfg: Cfg; extra: Partial<{ name: string; dataset_id: string }> } | null;
+        if (next) pendingSave.current = { ...next, cfg: adopt(next.cfg) };
+        undoStack.current = undoStack.current.map(adopt);
+        redoStack.current = redoStack.current.map(adopt);
+      }
+      const touchesP = ((job.cfg.annotations ?? []) as Cfg[]).some((a) => a.type === "pvalue");
+      if (job.extra.dataset_id || job.extra.name || isNewStars || touchesP || fig!.stale) ctx.reload();
     } catch (e) {
       setSaveErr(e instanceof ApiError && e.status === 409 ? t("conflict") : (lang === "fr" ? "Échec de l’enregistrement. Vos modifications sont conservées dans cette page ; réessayez." : "Saving failed. Your changes are kept on this page; try again."));
       if (!pendingSave.current) pendingSave.current = job;
@@ -243,15 +281,6 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     setSelected(null);
     await ctx.reload();
   }
-  // the stars panel shows the settings actually used by the saved stars analysis
-  const starsAnalysisId = ((cfg.annotations ?? []) as Cfg[]).find((a) => a.type === "pvalue" && a.all)?.analysis_id as string | undefined;
-  useEffect(() => {
-    const an = starsAnalysisId ? ctx.project.analyses.find((x) => x.id === starsAnalysisId) : undefined;
-    if (!an) return;
-    const c = (an.config ?? {}) as Record<string, any>;
-    setStarsOpts({ mode: c.mode ?? "all", control: c.control ?? "", test: c.test ?? "welch", correction: c.correction ?? "holm" });
-  }, [starsAnalysisId, ctx.project.analyses]);
-
   // Axis scaling and significance stars belong to one Y variable. Switching Y saves them for the variable
   // being left and restores those of the new one (or lets the axis autoscale if it was never adjusted).
   function yKey(c: Cfg): string {
@@ -265,11 +294,14 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     const per: Record<string, Cfg> = { ...(cfg.per_y ?? {}) };
     per[oldK] = { ...Object.fromEntries(Y_KEYS.map((k) => [k, cfg[k] ?? null])), annotations: anns.filter((a) => a.type === "pvalue") };
     const saved = per[newK];
+    // automatic stars stay on: the server recomputes them for the new variable
+    const auto = anns.find((a) => a.type === "pvalue" && a.all);
+    const savedP = ((saved?.annotations as Cfg[]) ?? []).filter((a) => !(auto && a.all));
     set({
       ...patch,
       ...Object.fromEntries(Y_KEYS.map((k) => [k, saved ? saved[k] ?? null : null])),
       per_y: per,
-      annotations: [...anns.filter((a) => a.type !== "pvalue"), ...((saved?.annotations as Cfg[]) ?? [])],
+      annotations: [...anns.filter((a) => a.type !== "pvalue"), ...savedP, ...(auto ? [auto] : [])],
     });
   }
 
@@ -287,36 +319,6 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     }
   }
 
-  async function autoStars() {
-    setStarsBusy(true);
-    try {
-      const existing = annotations.findIndex((a) => a.type === "pvalue" && a.all);
-      const config = {
-        group_col: cfg.group_col ?? null, value_col: cfg.value_col ?? null, average_technical: !!cfg.average_technical,
-        groups: groups.length ? order : undefined, mode: starsOpts.mode, control: starsOpts.control || order[0], test: starsOpts.test, correction: starsOpts.correction,
-      };
-      let aid: string;
-      const old = existing >= 0 ? ctx.project.analyses.find((x) => x.id === annotations[existing].analysis_id) : undefined;
-      if (old) {
-        const u = await api.put<Analysis>(`/api/projects/${pid}/analyses/${old.id}`, { config, version: old.version });
-        aid = u.id;
-      } else {
-        const a = await api.post<Analysis>(`/api/projects/${pid}/analyses`, { dataset_id: fig!.dataset_id, kind: "pairwise", name: `${lang === "fr" ? "Étoiles" : "Stars"} – ${fig!.name}${cfg.value_col ? ` – ${ds?.content.columns.find((c) => c.id === cfg.value_col)?.name ?? ""}` : ""}`, config });
-        aid = a.id;
-      }
-      await api.post(`/api/projects/${pid}/analyses/${aid}/run`);
-      const ann = { type: "pvalue", analysis_id: aid, all: true };
-      // the automatic set replaces any earlier bracket from the same analysis: one bracket per pair
-      const others = annotations.filter((a) => !(a.type === "pvalue" && (a.all || a.analysis_id === aid)));
-      set({ annotations: [...others, ann], p_format: figurePFormat(cfg) });
-      await ctx.reload();
-    } catch (e) {
-      setRenderErr(e instanceof ApiError ? JSON.stringify(e.detail) : String(e));
-    } finally {
-      setStarsBusy(false);
-    }
-  }
-
   const type: string = cfg.type ?? "scatter_groups";
   const isGroup = GROUP_TYPES.includes(type);
   const numericCols = numericColumns(ds?.content);
@@ -331,6 +333,18 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   const pngPx = (mm: number) => Math.round((mm / 25.4) * dpi);
   const pAnalyses = ctx.project.analyses.filter((a) => a.dataset_id === fig.dataset_id && a.last_result?.result.status === "ok" && (a.last_result.result.comparisons?.length ?? 0) > 0);
   const annotations: Cfg[] = cfg.annotations ?? [];
+  // automatic stars: settings live in the figure; older figures fall back to their analysis's settings
+  const starsAnn = annotations.find((a) => a.type === "pvalue" && a.all);
+  const starsAnCfg = ((starsAnn?.analysis_id ? ctx.project.analyses.find((x) => x.id === starsAnn.analysis_id)?.config : undefined) ?? {}) as Cfg;
+  const starsOpts: { mode: string; control: string; test: string; correction: string } = {
+    mode: "all", control: "", test: "welch", correction: "holm",
+    ...Object.fromEntries(["mode", "control", "test", "correction"].filter((k) => starsAnCfg[k]).map((k) => [k, starsAnCfg[k]])),
+    ...(cfg.stars ?? {}),
+  };
+  const setStars = (p: Partial<typeof starsOpts>) => set({ stars: { ...starsOpts, ...p } });
+  const toggleStars = (on: boolean) => set(on
+    ? { annotations: [...annotations.filter((a) => !(a.type === "pvalue" && a.all)), { type: "pvalue", all: true }], stars: starsOpts, p_format: figurePFormat(cfg) }
+    : { annotations: annotations.filter((a) => !(a.type === "pvalue" && a.all)) });
   const exportUrl = (fmt: string) => `/api/projects/${pid}/figures/${fig.id}/export?format=${fmt}&dpi=${dpi}&background=${bg}&lang=${lang}`;
   const num = (v: string) => (v.trim() === "" ? null : Number(v.replace(",", ".")));
   const field = (k: Key, key: string, step = 0.25) => (
@@ -339,10 +353,9 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
 
   return (
     <>
-      <div className="main-header">
+      <div className="main-header fig-header">
         <input className="name-input" value={fig.name} disabled={!canEdit} onChange={(e) => { setFig({ ...fig, name: e.target.value }); persist(cfg, { name: e.target.value }); }} aria-label="name" />
-        {fig.stale && <span className="badge stale" title={t("staleExplain")}>{t("stale")}</span>}
-        <span className="small-text muted">{saved ? t("saved") : t("saving")}</span>
+        <span className={`save-state ${saved ? "ok" : ""}`}>{saved ? `✓ ${t("saved")}` : t("saving")}</span>
         <div className="grow" />
         {canEdit && <>
           <button className="small" onClick={undo} disabled={!undoStack.current.length} title="Ctrl/Cmd+Z">↶ {lang === "fr" ? "Annuler" : "Undo"}</button>
@@ -353,7 +366,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
           <StyleMenu cfg={cfg} set={set} canEdit={canEdit} builtins={Object.entries(PRESETS).map(([k, p]) => [k, p.label[lang === "fr" ? 0 : 1]])}
             applyBuiltin={(k) => set(PRESETS[k].cfg(Number(cfg.width_mm) || 80, Number(cfg.height_mm) || 70))} />
         </>}
-        {canEdit && <button className="small danger" onClick={async () => {
+        {canEdit && <button className="small danger ghost" title={t("delete")} onClick={async () => {
           if (!window.confirm(t("confirmDelete"))) return;
           await api.del(`/api/projects/${pid}/figures/${fig.id}`);
           await ctx.reload();
@@ -446,8 +459,10 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
             <div className="grid2">
               <label className="field"><span>{t("width")} (mm)</span><input type="number" min={20} max={500} value={w} disabled={!canEdit} onChange={(e) => set({ width_mm: Number(e.target.value) })} /></label>
               <label className="field"><span>{t("height")} (mm)</span><input type="number" min={20} max={500} value={h} disabled={!canEdit} onChange={(e) => set({ height_mm: Number(e.target.value) })} /></label>
-              <span className="small-text muted" style={{ gridColumn: "1 / 3" }}>= {(w / 10).toLocaleString(lang)} × {(h / 10).toLocaleString(lang)} cm ·{" "}
-                {[["85", t("width") + " 1 col."], ["180", "2 col."]].map(([v, l]) => <button key={v} className="ghost small" disabled={!canEdit} onClick={() => set({ width_mm: Number(v) })}>{l} ({v} mm)</button>)}</span>
+              <div className="size-presets">
+                <span className="small-text muted">= {(w / 10).toLocaleString(lang)} × {(h / 10).toLocaleString(lang)} cm</span>
+                <div className="seg">{[["85", "1 col."], ["180", "2 col."]].map(([v, l]) => <button key={v} className={String(w) === v ? "on" : ""} disabled={!canEdit} onClick={() => set({ width_mm: Number(v) })}>{l} · {v} mm</button>)}</div>
+              </div>
             </div>
           </details>
           <details open>
@@ -570,37 +585,44 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
             <div>
               {isGroup && (
                 <>
-                  <div className="stars-box">
-                    <b>★ {lang === "fr" ? "Étoiles de significativité automatiques" : "Automatic significance stars"}</b>
-                    <div className="grid2" style={{ marginTop: 6 }}>
-                      <label className="field"><span>{lang === "fr" ? "Comparer" : "Compare"}</span>
-                        <select value={starsOpts.mode} onChange={(e) => setStarsOpts({ ...starsOpts, mode: e.target.value })}>
-                          <option value="all">{lang === "fr" ? "Toutes les paires" : "All pairs"}</option>
-                          <option value="control">{lang === "fr" ? "Chaque groupe vs contrôle" : "Each group vs control"}</option></select></label>
-                      {starsOpts.mode === "control" ? <label className="field"><span>{lang === "fr" ? "Contrôle" : "Control"}</span>
-                        <select value={starsOpts.control || order[0]} onChange={(e) => setStarsOpts({ ...starsOpts, control: e.target.value })}>
-                          {order.map((g) => <option key={g}>{g}</option>)}</select></label> : <div />}
-                      <label className="field"><span>{t("testUsed")}</span>
-                        <select value={starsOpts.test} onChange={(e) => setStarsOpts({ ...starsOpts, test: e.target.value })}>
-                          <option value="welch">{lang === "fr" ? "t de Welch (non apparié)" : "Welch t (unpaired)"}</option>
-                          <option value="student">{lang === "fr" ? "t de Student" : "Student t"}</option>
-                          <option value="mannwhitney">Mann–Whitney</option>
-                          <option value="paired">{lang === "fr" ? "t apparié" : "Paired t"}</option>
-                          <option value="wilcoxon">{lang === "fr" ? "Wilcoxon apparié" : "Wilcoxon paired"}</option></select></label>
-                      <label className="field"><span>{lang === "fr" ? "Correction multiple" : "Multiple-comparison correction"}</span>
-                        <select value={starsOpts.correction} onChange={(e) => setStarsOpts({ ...starsOpts, correction: e.target.value })}>
-                          <option value="holm">Holm–Bonferroni ({lang === "fr" ? "recommandé" : "recommended"})</option>
-                          <option value="bonferroni">Bonferroni</option>
-                          <option value="none">{lang === "fr" ? "Aucune" : "None"}</option></select></label>
-                    </div>
-                    <div className="field"><span>{lang === "fr" ? "Afficher sur la figure" : "Show on the figure"}</span><PFormat cfg={cfg} set={set} canEdit={canEdit} /></div>
-                    {figurePFormat(cfg) === "stars" && <StarThresholds cfg={cfg} set={set} canEdit={canEdit} />}
-                    <label className="check"><input type="checkbox" disabled={!canEdit} checked={!!cfg.hide_ns} onChange={(e) => set({ hide_ns: e.target.checked })} /> {lang === "fr" ? "Masquer les comparaisons « ns »" : "Hide “ns” comparisons"}</label>
-                    <button className="primary small" disabled={!canEdit || starsBusy || order.length < 2} onClick={autoStars}>
-                      {starsBusy ? "…" : annotations.some((a) => a.type === "pvalue" && a.all) ? (lang === "fr" ? "Recalculer les étoiles" : "Recompute stars") : (lang === "fr" ? "Ajouter les étoiles" : "Add stars")}</button>
-                    <p className="small-text muted" style={{ marginTop: 6 }}>{lang === "fr"
-                      ? "Crée une analyse enregistrée « comparaisons deux à deux » (visible dans Analyses), avec la correction indiquée dans la légende."
-                      : "Creates a saved “pairwise comparisons” analysis (listed under Analyses); the correction is stated in the caption."}</p>
+                  <div className={`stars-box ${starsAnn ? "on" : ""}`}>
+                    <label className="switch">
+                      <input type="checkbox" role="switch" disabled={!canEdit || order.length < 2} checked={!!starsAnn} onChange={(e) => toggleStars(e.target.checked)} />
+                      <span className="switch-track" aria-hidden />
+                      <b>★ {lang === "fr" ? "Étoiles de significativité" : "Significance stars"}</b>
+                    </label>
+                    {order.length < 2 && <p className="small-text muted" style={{ margin: "6px 0 0" }}>{lang === "fr" ? "Il faut au moins deux groupes." : "At least two groups are needed."}</p>}
+                    {starsAnn && <>
+                      <div className="grid2" style={{ marginTop: 10 }}>
+                        <label className="field"><span>{lang === "fr" ? "Comparer" : "Compare"}</span>
+                          <select value={starsOpts.mode} disabled={!canEdit} onChange={(e) => setStars({ mode: e.target.value })}>
+                            <option value="all">{lang === "fr" ? "Toutes les paires" : "All pairs"}</option>
+                            <option value="control">{lang === "fr" ? "Chaque groupe vs contrôle" : "Each group vs control"}</option></select></label>
+                        {starsOpts.mode === "control" ? <label className="field"><span>{lang === "fr" ? "Contrôle" : "Control"}</span>
+                          <select value={order.includes(starsOpts.control) ? starsOpts.control : order[0]} disabled={!canEdit} onChange={(e) => setStars({ control: e.target.value })}>
+                            {order.map((g) => <option key={g}>{g}</option>)}</select></label> : <div />}
+                      </div>
+                      <div>
+                        <label className="field"><span>{t("testUsed")}</span>
+                          <select value={starsOpts.test} disabled={!canEdit} onChange={(e) => setStars({ test: e.target.value })}>
+                            <option value="welch">{lang === "fr" ? "t de Welch (non apparié)" : "Welch t (unpaired)"}</option>
+                            <option value="student">{lang === "fr" ? "t de Student" : "Student t"}</option>
+                            <option value="mannwhitney">Mann–Whitney</option>
+                            <option value="paired">{lang === "fr" ? "t apparié" : "Paired t"}</option>
+                            <option value="wilcoxon">{lang === "fr" ? "Wilcoxon apparié" : "Wilcoxon paired"}</option></select></label>
+                        <label className="field"><span>{lang === "fr" ? "Correction multiple" : "Multiple-comparison correction"}</span>
+                          <select value={starsOpts.correction} disabled={!canEdit} onChange={(e) => setStars({ correction: e.target.value })}>
+                            <option value="holm">Holm–Bonferroni ({lang === "fr" ? "recommandé" : "recommended"})</option>
+                            <option value="bonferroni">Bonferroni</option>
+                            <option value="none">{lang === "fr" ? "Aucune" : "None"}</option></select></label>
+                      </div>
+                      <div className="field"><span>{lang === "fr" ? "Afficher sur la figure" : "Show on the figure"}</span><PFormat cfg={cfg} set={set} canEdit={canEdit} /></div>
+                      {figurePFormat(cfg) === "stars" && <StarThresholds cfg={cfg} set={set} canEdit={canEdit} />}
+                      <label className="check"><input type="checkbox" disabled={!canEdit} checked={!!cfg.hide_ns} onChange={(e) => set({ hide_ns: e.target.checked })} /> {lang === "fr" ? "Masquer les comparaisons « ns »" : "Hide “ns” comparisons"}</label>
+                      <p className="auto-note">{lang === "fr"
+                        ? "Mises à jour automatiquement quand les données, la variable, les groupes ou le test changent. Le détail est enregistré dans Analyses ; la correction est indiquée dans la légende."
+                        : "Updated automatically when the data, the variable, the groups or the test change. Details are saved under Analyses; the correction is stated in the caption."}</p>
+                    </>}
                   </div>
                   <p className="small-text muted">{t("pOnlyFromAnalysis")}</p>
                   {annotations.map((a, i) => a.type === "pvalue" && !a.all ? (
@@ -612,7 +634,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                     </div>
                   ) : null)}
                   {pAnalyses.length === 0 ? <p className="small-text muted">{t("noAnalysisForP")}</p>
-                    : <button className="small" disabled={!canEdit} onClick={() => set({ annotations: [...annotations, { type: "pvalue", analysis_id: pAnalyses[0].id }] })}>+ {t("addPValue")}</button>}
+                    : <button className="small wrap-btn" disabled={!canEdit} onClick={() => set({ annotations: [...annotations, { type: "pvalue", analysis_id: pAnalyses[0].id }] })}>+ {t("addPValue")}</button>}
                   <hr style={{ border: "none", borderTop: "1px solid var(--line-2)", margin: "10px 0" }} />
                 </>
               )}
@@ -653,13 +675,14 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
           {saveErr && <div className="notice error row" style={{ marginBottom: 8 }}><span className="grow">{saveErr}</span>
             <button className="small" onClick={retrySave}>{lang === "fr" ? "Réessayer (garder ma version)" : "Retry (keep my version)"}</button>
             <button className="small" onClick={() => window.location.reload()}>{lang === "fr" ? "Recharger la figure" : "Reload figure"}</button></div>}
-          <div className="fig-canvas">
+          <div className={`fig-canvas ${rendering ? "busy" : ""}`}>
+            <span className="render-pill" aria-live="polite">{rendering ? (lang === "fr" ? "Mise à jour…" : "Updating…") : ""}</span>
             {svg ? (
               <ResizeBox widthMm={w} heightMm={h} disabled={!canEdit} onResize={(W, H) => set({ width_mm: W, height_mm: H })}>
                 <FigureCanvas svg={svg} widthMm={w} zoom={zoom} selected={selected} canEdit={canEdit} rowLabel={rowLabel}
                   onSelect={setSelected} onDrag={onDrag} onInlineEdit={onInlineEdit} />
               </ResizeBox>
-            ) : !renderErr && <span className="muted small-text">…</span>}
+            ) : !renderErr && <div className="fig-skeleton" style={{ width: `${w * zoom}mm`, height: `${h * zoom}mm` }} />}
           </div>
           <div className="row" style={{ marginTop: 8 }}>
             <span className="small-text muted grow">{t("previewNote")} {lang === "fr" ? "Cliquez un élément pour le modifier, double-cliquez un texte pour l’éditer, glissez titre, légende et textes." : "Click an element to edit it, double-click a text to edit it in place, drag the title, legend and texts."}</span>
