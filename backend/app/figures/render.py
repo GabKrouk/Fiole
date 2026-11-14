@@ -400,8 +400,13 @@ def render_figure(content: dict, cfg_in: dict, results: dict[str, dict] | None =
             t_name = (r.get("title") or {}).get(lang, "")
             fam = r.get("family")
             if fam:
-                corr = {"holm": "Holm", "bonferroni": "Bonferroni", "none": "sans correction" if lang == "fr" else "no correction"}[fam["correction"]]
-                t_name += f" ({fam['test']}, {corr})"
+                from ..stats.analyses import CORR_TEXT, PAIR_TEST
+                li = 1 if lang == "fr" else 0
+                corr = CORR_TEXT.get(fam["correction"], (fam["correction"],) * 2)[li]
+                if fam["correction"] != "none":
+                    corr = ("correction de " if lang == "fr" else "") + corr + ("" if lang == "fr" else " correction")
+                test_txt = PAIR_TEST[fam["test"]][2][li] if fam["test"] in PAIR_TEST else fam["test"]
+                t_name += f" ({test_txt}, {corr})"
             if t_name and t_name not in tests:
                 tests.append(t_name)
         cap += (" Tests : " if lang == "fr" else " Tests: ") + "; ".join(tests) + "."
@@ -416,12 +421,12 @@ def render_figure(content: dict, cfg_in: dict, results: dict[str, dict] | None =
     return {"svg": svg.render(), "caption": cap, "warnings": warnings}
 
 
-def _frame(svg: SVG, cfg: dict, n_cats: int | None, xlabels: list[str] | None, ylo: float, yhi: float, yticks: list[float], log: bool, xscale=None, xticks=None):
+def _frame(svg: SVG, cfg: dict, n_cats: int | None, xlabels: list[str] | None, ylo: float, yhi: float, yticks: list[float], log: bool, xscale=None, xticks=None, extra_top: float = 0.0):
     """Compute plot area and draw axes. Returns (left, right, top, bottom, yscale)."""
     W, H = svg.w, svg.h
     fs = cfg["font_size_pt"]
     lw = cfg["line_width_pt"]
-    top = 4 + (cfg["title_size_pt"] * 1.6 if cfg["title"] else 0) + fs * 0.6
+    top = 4 + (cfg["title_size_pt"] * 1.6 if cfg["title"] else 0) + fs * 0.6 + extra_top
     ytick_w = max((text_width(fmt_tick(v).split("<")[0], fs) for v in yticks), default=fs)
     ylab = cfg["y_label"] + (f" ({cfg['y_unit']})" if cfg["y_unit"] else "")
     left = 3 + (fs * 1.4 if ylab else 0) + ytick_w + fs * 0.6 + 3
@@ -625,12 +630,47 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
         placed.append((i1, i2, lvl))
         layout.append((k, c, label, i1, i2, lvl))
     n_levels = max((l for *_, l in layout), default=-1) + 1
-    span = (hi - lo) or 1.0
-    # Reserve headroom for brackets
-    hi_ext = hi + span * 0.13 * n_levels if n_levels and cfg["y_scale"] != "log10" else hi
-    ylo, yhi, yticks, log = _y_axis(cfg, lo, hi_ext, include_zero=cfg["type"] == "bar", warnings=warnings)
     labels = [cfg["group_labels"].get(g.name, g.name) for g in sel]
-    left, right, top, bottom, ys, rotate = _frame(svg, cfg, len(sel), labels, ylo, yhi, yticks, log)
+    include_zero = cfg["type"] == "bar"
+    # Brackets are laid out in points above the highest data value. Reserve exactly that room inside the
+    # plot: extend the automatic Y range, or (fixed Y max / log scale) enlarge the top margin, so that
+    # brackets and stars never leave the figure or run into the title.
+    bracket_gap, level_h = 6.0, fs * 2.0
+    needed = (bracket_gap + (n_levels - 1) * level_h + 1.2 + fs * 0.9 + 2.0) if n_levels else 0.0
+    hi_target = hi
+    extra_top = 0.0
+    ylo, yhi, yticks, log = _y_axis(cfg, lo, hi_target, include_zero=include_zero, warnings=[])
+    if n_levels:
+        auto_range = cfg["y_max"] is None and not log
+        _l, _r, ptop0, pbottom0, _ys0, _rot = _frame(SVG(svg.w, svg.h, cfg), cfg, len(sel), labels, ylo, yhi, yticks, log)
+        hp0 = pbottom0 - ptop0
+        max_head = hp0 * 0.55
+        if needed > max_head:  # small figure / many brackets: tighten the stacking before giving up room
+            bracket_gap = 3.0
+            level_h = max(fs * 1.25, (max_head - bracket_gap - 1.2 - fs * 0.9 - 2.0) / max(n_levels - 1, 1))
+            needed = bracket_gap + (n_levels - 1) * level_h + 1.2 + fs * 0.9 + 2.0
+        max_extra = max(hp0 - 25.0, 0.0)
+        for _ in range(12):
+            scratch = SVG(svg.w, svg.h, cfg)
+            _l, _r, ptop, pbottom, pys, _rot = _frame(scratch, cfg, len(sel), labels, ylo, yhi, yticks, log, extra_top=extra_top)
+            anchor = max(min(pys(hi), pbottom), ptop)
+            room = anchor - (ptop - extra_top)  # space between the bracket anchor and the title area
+            if room >= needed - 0.01:
+                break
+            hp = pbottom - ptop
+            if auto_range and extra_top == 0 and needed < hp * 0.8:
+                # solve (yhi - hi) / (yhi - ylo) * hp >= needed for yhi, then let nice_range round it up
+                hi_target = max(hi_target, (hi * hp - needed * ylo) / (hp - needed)) + (hi - lo or 1.0) * 1e-3
+                ylo, yhi, yticks, log = _y_axis(cfg, lo, hi_target, include_zero=include_zero, warnings=[])
+            else:
+                auto_range = False
+                if extra_top >= max_extra:
+                    warnings.append({"en": "The figure is too small to show every significance bracket clearly: enlarge it or hide “ns”.",
+                                     "fr": "La figure est trop petite pour afficher clairement tous les crochets de significativité : agrandissez-la ou masquez les « ns »."})
+                    break
+                extra_top = min(extra_top + needed - room, max_extra)
+    ylo, yhi, yticks, log = _y_axis(cfg, lo, hi_target, include_zero=include_zero, warnings=warnings)
+    left, right, top, bottom, ys, rotate = _frame(svg, cfg, len(sel), labels, ylo, yhi, yticks, log, extra_top=extra_top)
 
     band = (right - left) / len(sel)
     svg.add(f'<clipPath id="plotclip"><rect x="{left:.2f}" y="{top - 1:.2f}" width="{right - left:.2f}" height="{bottom - top + 1:.2f}"/></clipPath>')
@@ -714,7 +754,7 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
     # p-value brackets / stars: only from saved analysis results
     for k, c, label, i1, i2, lvl in layout:
         x1, x2 = left + band * (i1 + 0.5), left + band * (i2 + 0.5)
-        ybase = ys(hi) - 6 - lvl * (fs * 2.0)
+        ybase = max(min(ys(hi), bottom), top) - bracket_gap - lvl * level_h
         tick = 3
         svg.open("pvalue", index=k)
         svg.add(

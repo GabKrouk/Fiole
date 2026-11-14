@@ -42,6 +42,10 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   const [caption, setCaption] = useState("");
   const [warnings, setWarnings] = useState<{ en: string; fr: string }[]>([]);
   const [renderErr, setRenderErr] = useState("");
+  const [saveErr, setSaveErr] = useState("");
+  const renderSeq = useRef(0);
+  const saveChain = useRef<Promise<void>>(Promise.resolve());
+  const pendingSave = useRef<{ cfg: Cfg; extra: Partial<{ name: string; dataset_id: string }> } | null>(null);
   const [saved, setSaved] = useState(true);
   const [zoom, setZoom] = useState(1.5);
   const [dpi, setDpi] = useState(300);
@@ -80,13 +84,16 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     if (!fig) return;
     window.clearTimeout(renderTimer.current);
     renderTimer.current = window.setTimeout(async () => {
+      const seq = ++renderSeq.current;
       try {
         const r = await api.post<{ svg: string; caption: string; warnings: { en: string; fr: string }[] }>(`/api/projects/${pid}/render`, { dataset_id: fig.dataset_id, config: { ...cfg, background: bg }, lang });
+        if (seq !== renderSeq.current) return; // a newer render is on its way: never show an outdated figure
         setSvg(r.svg);
         setCaption(r.caption);
         setWarnings(r.warnings);
         setRenderErr("");
       } catch (e) {
+        if (seq !== renderSeq.current) return;
         setRenderErr(e instanceof ApiError ? (e.detail?.message ? L(e.detail.message) : JSON.stringify(e.detail)) : String(e));
       }
     }, 200);
@@ -117,19 +124,38 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
 
   if (!fig) return null;
 
+  // Saves are debounced and strictly sequential: a save never starts while the previous one is in
+  // flight, so our own edits can never collide with each other on the optimistic version number.
+  async function flushSave() {
+    const job = pendingSave.current;
+    if (!job) return;
+    pendingSave.current = null;
+    try {
+      const r = await api.put<{ version: number }>(`/api/projects/${pid}/figures/${fig!.id}`, { config: job.cfg, version: versionRef.current, ...job.extra });
+      versionRef.current = r.version;
+      setSaveErr("");
+      if (!pendingSave.current) setSaved(true);
+      if (job.extra.dataset_id || job.extra.name) ctx.reload();
+    } catch (e) {
+      setSaveErr(e instanceof ApiError && e.status === 409 ? t("conflict") : (lang === "fr" ? "Échec de l’enregistrement. Vos modifications sont conservées dans cette page ; réessayez." : "Saving failed. Your changes are kept on this page; try again."));
+      if (!pendingSave.current) pendingSave.current = job;
+    }
+  }
+  async function retrySave() {
+    setSaveErr("");
+    try {
+      const p = await api.get<{ figures: { id: string; version: number }[] }>(`/api/projects/${pid}`);
+      const f = p.figures.find((x) => x.id === fig!.id);
+      if (f) versionRef.current = f.version;
+    } catch { /* keep the known version */ }
+    if (!pendingSave.current) pendingSave.current = { cfg, extra: {} };
+    saveChain.current = saveChain.current.then(flushSave);
+  }
   function persist(next: Cfg, extra: Partial<{ name: string; dataset_id: string }> = {}) {
     setSaved(false);
+    pendingSave.current = { cfg: next, extra: { ...(pendingSave.current?.extra ?? {}), ...extra } };
     window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(async () => {
-      try {
-        const r = await api.put<{ version: number }>(`/api/projects/${pid}/figures/${fig!.id}`, { config: next, version: versionRef.current, ...extra });
-        versionRef.current = r.version;
-        setSaved(true);
-        if (extra.dataset_id || extra.name) ctx.reload();
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 409) setRenderErr(t("conflict"));
-      }
-    }, 500);
+    saveTimer.current = window.setTimeout(() => { saveChain.current = saveChain.current.then(flushSave); }, 500);
   }
   const set = (p: Cfg) => {
     const next = { ...cfg, ...p };
@@ -203,6 +229,15 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     setSelected(null);
     await ctx.reload();
   }
+  // the stars panel shows the settings actually used by the saved stars analysis
+  const starsAnalysisId = ((cfg.annotations ?? []) as Cfg[]).find((a) => a.type === "pvalue" && a.all)?.analysis_id as string | undefined;
+  useEffect(() => {
+    const an = starsAnalysisId ? ctx.project.analyses.find((x) => x.id === starsAnalysisId) : undefined;
+    if (!an) return;
+    const c = (an.config ?? {}) as Record<string, any>;
+    setStarsOpts({ mode: c.mode ?? "all", control: c.control ?? "", test: c.test ?? "welch", correction: c.correction ?? "holm" });
+  }, [starsAnalysisId, ctx.project.analyses]);
+
   async function autoStars() {
     setStarsBusy(true);
     try {
@@ -535,11 +570,15 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
           </details>
         </div>
         <div>
+          {renderErr && <div className="notice error" style={{ marginBottom: 8 }}>{renderErr}{svg && <span className="small-text"> {lang === "fr" ? "(dernier aperçu valide affiché)" : "(last valid preview shown)"}</span>}</div>}
+          {saveErr && <div className="notice error row" style={{ marginBottom: 8 }}><span className="grow">{saveErr}</span>
+            <button className="small" onClick={retrySave}>{lang === "fr" ? "Réessayer (garder ma version)" : "Retry (keep my version)"}</button>
+            <button className="small" onClick={() => window.location.reload()}>{lang === "fr" ? "Recharger la figure" : "Reload figure"}</button></div>}
           <div className="fig-canvas">
-            {renderErr ? <div className="notice error">{renderErr}</div> : (
+            {svg ? (
               <FigureCanvas svg={svg} widthMm={w} zoom={zoom} selected={selected} canEdit={canEdit} rowLabel={rowLabel}
                 onSelect={setSelected} onDrag={onDrag} onInlineEdit={onInlineEdit} />
-            )}
+            ) : !renderErr && <span className="muted small-text">…</span>}
           </div>
           <div className="row" style={{ marginTop: 8 }}>
             <span className="small-text muted grow">{t("previewNote")} {lang === "fr" ? "Cliquez un élément pour le modifier, double-cliquez un texte pour l’éditer, glissez titre, légende et textes." : "Click an element to edit it, double-click a text to edit it in place, drag the title, legend and texts."}</span>

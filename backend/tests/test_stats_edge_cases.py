@@ -151,3 +151,52 @@ def test_pairwise_and_auto_stars():
                         {"A": {"result": r, "stale": False}})
     assert out["svg"].count('class="pvalue-bracket"') == 3
     assert "Holm" in out["caption"] and "* p < 0.05" in out["caption"]
+
+
+def _four_groups():
+    import random
+    rnd = random.Random(1)
+    rows, i = [], 0
+    for g, m in {"Col": 6.6, "tga1": 7.6, "tga4": 6.5, "tga1tga4": 8.3}.items():
+        for _ in range(10):
+            rows.append({"id": f"r{i}", "cells": {"g": g, "a": round(rnd.gauss(m, 0.35), 2)}})
+            i += 1
+    return {"columns": [{"id": "g", "name": "Genotype", "type": "text"}, {"id": "a", "name": "N%", "type": "numeric"}],
+            "rows": rows, "design": {"layout": "wide", "group_columns": []}, "exclusions": []}
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("extra", [{}, {"y_max": 9}, {"y_max": 7}, {"y_scale": "log10"}, {"height_mm": 45}, {"frame": "closed", "font_size_pt": 11}])
+def test_star_brackets_stay_inside_figure_and_below_title(extra):
+    import re
+    from app.figures.render import render_figure
+    c = _four_groups()
+    res = run_analysis("pairwise", c, {"group_col": "g", "value_col": "a", "test": "student", "correction": "none"})
+    cfg = {"type": "box", "group_col": "g", "value_col": "a", "title": "Yo this is great", "show_points": True,
+           "annotations": [{"type": "pvalue", "analysis_id": "A", "all": True, "format": "stars"}], **extra}
+    out = render_figure(c, cfg, results={"A": {"result": res, "stale": False}})
+    svg = out["svg"]
+    title_size = 9.0
+    title_bottom = 4 + title_size + 1
+    groups = re.findall(r'<g data-el="pvalue"[^>]*>(.*?)</g>', svg, flags=re.S)
+    assert len(groups) == 6  # all 6 pairs, ns included
+    ys = []
+    for g in groups:
+        ys += [float(v) for v in re.findall(r'[ML][\d.]+,([\d.]+)', g)]
+        ys += [float(v) - 8 for v in re.findall(r'<text[^>]* y="([\d.]+)"', g)]  # top of the glyphs (approx.)
+    assert min(ys) >= title_bottom, (extra, min(ys))
+    assert ">ns<" in svg
+    # the caption names the test and the correction in words
+    assert "Student" in out["caption"] and "correction" in out["caption"]
+
+
+def test_pairwise_caption_holm_default():
+    from app.figures.render import render_figure
+    c = _four_groups()
+    res = run_analysis("pairwise", c, {"group_col": "g", "value_col": "a"})
+    out = render_figure(c, {"type": "box", "group_col": "g", "value_col": "a",
+                            "annotations": [{"type": "pvalue", "analysis_id": "A", "all": True, "format": "stars"}]},
+                        results={"A": {"result": res, "stale": False}}, lang="fr")
+    assert "Welch" in out["caption"] and "Holm" in out["caption"]

@@ -212,12 +212,14 @@ table.stats th { font-weight: 600; color: var(--ink-2); font-size: 12px; }
 .methods { background: var(--surface-2); border-radius: 6px; padding: 10px 12px; font-size: 13px; }
 
 /* Figure editor */
-.fig-layout { display: grid; grid-template-columns: 340px 1fr; gap: 16px; align-items: start; }
+.fig-layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px; align-items: start; }
 .fig-controls { max-height: calc(100vh - 140px); overflow-y: auto; padding-right: 4px; }
 .fig-controls details { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 8px; }
 .fig-controls summary { padding: 9px 12px; cursor: pointer; font-weight: 600; font-size: 13px; }
 .fig-controls details > div { padding: 4px 12px 10px; }
-.fig-canvas { background: repeating-conic-gradient(#eeebe4 0% 25%, #f7f6f2 0% 50%) 50% / 16px 16px; border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; display: grid; place-items: center; min-height: 360px; position: sticky; top: 0; }
+.fig-canvas { background: repeating-conic-gradient(#eeebe4 0% 25%, #f7f6f2 0% 50%) 50% / 16px 16px; border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; display: flex; justify-content: safe center; align-items: flex-start; min-height: 360px; max-height: calc(100vh - 150px); overflow: auto; position: sticky; top: 0; }
+.fig-canvas > * { flex-shrink: 0; }
+.fig-canvas .sheet { margin: auto; }
 .fig-canvas .sheet { box-shadow: 0 2px 12px rgba(0,0,0,0.08); line-height: 0; }
 .fig-canvas svg { display: block; }
 .swatch { width: 22px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; }
