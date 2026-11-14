@@ -289,3 +289,25 @@ def test_quick_styles_render_cleanly_at_all_sizes(style, size, fmt, fixed):
     assert plot_h >= (0.2 if too_small else 0.3) * fig_h, (style, size, plot_h, fig_h)
     if too_small:  # only on the smallest panel
         assert size == (60, 50)
+
+
+def test_rich_text_markup_parse_and_render():
+    import re
+    from app.figures import richtext as rt
+    from app.figures.render import render_figure
+    runs = rt.parse('Effect of <i>tga1</i> on N<sub>2</sub> <span color="#d00000"><b>x</b></span> p &lt; 0.05 <foo>')
+    assert [(t, s.i, s.b, s.shift, s.color) for t, s in runs] == [
+        ("Effect of ", False, False, "", None), ("tga1", True, False, "", None), (" on N", False, False, "", None),
+        ("2", False, False, "sub", None), (" ", False, False, "", None), ("x", False, True, "", "#d00000"),
+        (" p < 0.05 <foo>", False, False, "", None)]
+    assert rt.plain("<i>tga1</i> &amp; <b>B</b>") == "tga1 & B"
+    # real font metrics: italic/bold text measured, wider bold
+    assert rt.measure("tga1", 10, bold=True) > rt.measure("tga1", 10)
+    c = _four_groups()
+    out = render_figure(c, {"type": "box", "group_col": "g", "value_col": "a", "title": "Effect of <i>tga1</i> <u>under</u>",
+                            "group_labels": {"tga1": "<i>tga1</i>"}})
+    svg = out["svg"]
+    assert re.search(r'font-style="italic"[^>]*>tga1</text>', svg)
+    assert svg.count('font-style="italic"') == 2
+    assert "&lt;i&gt;" not in svg  # markup never leaks as literal text
+    assert "tga1: n = 10" in out["caption"] and "<i>" not in out["caption"]

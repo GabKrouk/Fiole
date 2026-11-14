@@ -1,6 +1,7 @@
 import { ReactNode } from "react";
 import { useI18n } from "../i18n";
 import type { Selection } from "./FigureCanvas";
+import RichInput from "./RichText";
 
 type Cfg = Record<string, any>;
 
@@ -35,7 +36,9 @@ export default function Inspector({ sel, cfg, set, canEdit, isGroup, colorOf, ro
         {opts.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
       </select></label>
   );
-  const Txt = (label: string, key: string) => (
+  const Txt = (label: string, key: string, rich = true) => rich ? (
+    <div className="field"><span>{label}</span><RichInput ariaLabel={label} value={cfg[key] ?? ""} disabled={!canEdit} onChange={(v) => set({ [key]: v })} /></div>
+  ) : (
     <label className="field"><span>{label}</span><input value={cfg[key] ?? ""} disabled={!canEdit} onChange={(e) => set({ [key]: e.target.value })} /></label>
   );
   const ticks = (
@@ -59,7 +62,7 @@ export default function Inspector({ sel, cfg, set, canEdit, isGroup, colorOf, ro
     case "y-label":
       title = T("Axe Y", "Y axis");
       body = <>
-        <div className="grid2">{Txt(T("Titre de l’axe", "Axis title"), "y_label")}{Txt(T("Unité", "Unit"), "y_unit")}</div>
+        <div className="grid2">{Txt(T("Titre de l’axe", "Axis title"), "y_label")}{Txt(T("Unité", "Unit"), "y_unit", false)}</div>
         <div className="grid3">{N("min", "y_min")}{N("max", "y_max")}{N(T("Pas des graduations", "Tick spacing"), "y_tick_step")}</div>
         {S(T("Échelle", "Scale"), "y_scale", [["linear", t("scaleLinear")], ["log10", t("scaleLog")]], "linear")}
         {ticks}
@@ -70,7 +73,7 @@ export default function Inspector({ sel, cfg, set, canEdit, isGroup, colorOf, ro
     case "x-label":
       title = T("Axe X", "X axis");
       body = <>
-        <div className="grid2">{Txt(T("Titre de l’axe", "Axis title"), "x_label")}{!isGroup && Txt(T("Unité", "Unit"), "x_unit")}</div>
+        <div className="grid2">{Txt(T("Titre de l’axe", "Axis title"), "x_label")}{!isGroup && Txt(T("Unité", "Unit"), "x_unit", false)}</div>
         {!isGroup && <><div className="grid3">{N("min", "x_min")}{N("max", "x_max")}{N(T("Pas des graduations", "Tick spacing"), "x_tick_step")}</div>
           {S(T("Échelle", "Scale"), "x_scale", [["linear", t("scaleLinear")], ["log10", t("scaleLog")]], "linear")}</>}
         {ticks}
@@ -81,9 +84,9 @@ export default function Inspector({ sel, cfg, set, canEdit, isGroup, colorOf, ro
     case "frame":
       title = T("Cadre du graphique", "Plot frame");
       body = <>
-        <div className="row" style={{ marginBottom: 10 }}>
-          <button className={`small ${(cfg.frame ?? "open") === "open" ? "primary" : ""}`} disabled={!canEdit} onClick={() => set({ frame: "open" })}>└ {T("Ouvert (axes X et Y)", "Open (X and Y axes)")}</button>
-          <button className={`small ${cfg.frame === "closed" ? "primary" : ""}`} disabled={!canEdit} onClick={() => set({ frame: "closed" })}>▢ {T("Fermé (4 côtés)", "Closed (4 sides)")}</button>
+        <div className="seg" style={{ marginBottom: 10 }} role="group" aria-label={T("Cadre", "Frame")}>
+          <button className={(cfg.frame ?? "open") === "open" ? "on" : ""} aria-pressed={(cfg.frame ?? "open") === "open"} disabled={!canEdit} onClick={() => set({ frame: "open" })}>└ {T("Ouvert (axes X et Y)", "Open (X and Y axes)")}</button>
+          <button className={cfg.frame === "closed" ? "on" : ""} aria-pressed={cfg.frame === "closed"} disabled={!canEdit} onClick={() => set({ frame: "closed" })}>▢ {T("Fermé (4 côtés)", "Closed (4 sides)")}</button>
         </div>
         <div className="grid3">{N(t("lineWidth"), "line_width_pt", 0.25, 0.1)}{N(T("Largeur (mm)", "Width (mm)"), "width_mm", 1, 20)}{N(T("Hauteur (mm)", "Height (mm)"), "height_mm", 1, 20)}</div>
         {ticks}
@@ -95,8 +98,8 @@ export default function Inspector({ sel, cfg, set, canEdit, isGroup, colorOf, ro
       title = `${T("Groupe", "Group")} « ${g} »`;
       body = <>
         <div className="grid2">
-          <label className="field"><span>{T("Nom affiché", "Displayed name")}</span>
-            <input value={(cfg.group_labels ?? {})[g] ?? g} disabled={!canEdit} onChange={(e) => set({ group_labels: { ...(cfg.group_labels ?? {}), [g]: e.target.value } })} /></label>
+          <div className="field"><span>{T("Nom affiché", "Displayed name")}</span>
+            <RichInput ariaLabel={T("Nom affiché", "Displayed name")} value={(cfg.group_labels ?? {})[g] ?? g} disabled={!canEdit} onChange={(v) => set({ group_labels: { ...(cfg.group_labels ?? {}), [g]: v } })} /></div>
           <label className="field"><span>{T("Couleur", "Colour")}</span>
             <input type="color" className="swatch" style={{ width: 44, height: 30 }} value={colorOf(g)} disabled={!canEdit}
               onChange={(e) => set({ colors: { ...(cfg.colors ?? {}), [g]: e.target.value } })} /></label>
@@ -145,7 +148,7 @@ export default function Inspector({ sel, cfg, set, canEdit, isGroup, colorOf, ro
       const upd = (p: Cfg) => { const n = [...(cfg.annotations ?? [])]; n[k] = { ...a, ...p }; set({ annotations: n }); };
       title = T("Texte manuel", "Manual text");
       body = <>
-        <label className="field"><span>{T("Texte", "Text")}</span><input value={a.text ?? ""} disabled={!canEdit} onChange={(e) => upd({ text: e.target.value })} /></label>
+        <div className="field"><span>{T("Texte", "Text")}</span><RichInput ariaLabel={T("Texte", "Text")} value={a.text ?? ""} disabled={!canEdit} onChange={(v) => upd({ text: v })} /></div>
         <div className="grid3">
           <label className="field"><span>{T("Taille (pt)", "Size (pt)")}</span><input type="number" step={0.5} value={a.size_pt ?? cfg.font_size_pt ?? 8} disabled={!canEdit} onChange={(e) => upd({ size_pt: num(e.target.value) })} /></label>
           <label className="check" style={{ marginTop: 22 }}><input type="checkbox" checked={!!a.bold} disabled={!canEdit} onChange={(e) => upd({ bold: e.target.checked })} /> {T("Gras", "Bold")}</label>
@@ -197,9 +200,9 @@ export function PFormat({ cfg, set, canEdit }: { cfg: Cfg; set: (p: Cfg) => void
   const { lang } = useI18n();
   const f = figurePFormat(cfg);
   return (
-    <div className="row tight" role="radiogroup" aria-label={lang === "fr" ? "Affichage" : "Display"}>
-      <label className="check" style={{ marginBottom: 0 }}><input type="radio" name="p_format" disabled={!canEdit} checked={f === "stars"} onChange={() => set({ p_format: "stars" })} /> ★ {lang === "fr" ? "Étoiles" : "Stars"}</label>
-      <label className="check" style={{ marginBottom: 0 }}><input type="radio" name="p_format" disabled={!canEdit} checked={f === "exact"} onChange={() => set({ p_format: "exact" })} /> {lang === "fr" ? "Valeur de p (p = …)" : "p-value (p = …)"}</label>
+    <div className="seg" role="radiogroup" aria-label={lang === "fr" ? "Affichage" : "Display"}>
+      <label className={f === "stars" ? "on" : ""}><input type="radio" name="p_format" disabled={!canEdit} checked={f === "stars"} onChange={() => set({ p_format: "stars" })} /> ★ {lang === "fr" ? "Étoiles" : "Stars"}</label>
+      <label className={f === "exact" ? "on" : ""}><input type="radio" name="p_format" disabled={!canEdit} checked={f === "exact"} onChange={() => set({ p_format: "exact" })} /> {lang === "fr" ? "Valeur de p (p = …)" : "p-value (p = …)"}</label>
     </div>
   );
 }

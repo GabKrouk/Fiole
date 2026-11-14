@@ -7,6 +7,7 @@ so font sizes and line widths in pt are exact at the final size.
 """
 from __future__ import annotations
 
+import html
 import math
 import re
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ import numpy as np
 
 from ..data import DataError, Group, _label, average_technical, col_by_id, design_for, excluded_row_ids, extract_groups
 from ..stats.core import describe
+from . import richtext as rt
 
 MM = 72 / 25.4  # points per mm
 
@@ -168,20 +170,12 @@ def fmt_tick(v: float) -> str:
 
 
 def text_width(s: str, size: float) -> float:
-    return 0.55 * size * len(s)
-
-
-SUPERSCRIPT = str.maketrans("0123456789-−+=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁻⁺⁼⁽⁾")
-
-
-def superscript(s: str) -> str:
-    """Turn <sup>…</sup> into Unicode superscript characters."""
-    return re.sub(r"<sup>(.*?)</sup>", lambda m: m.group(1).translate(SUPERSCRIPT), s)
+    """Width in pt, measured with real font metrics; understands the rich-text markup."""
+    return rt.width(s, size)
 
 
 def label_width(s: str, size: float) -> float:
-    m = re.fullmatch(r"(.*)<sup>(.*?)</sup>", s, flags=re.S)
-    return text_width(m.group(1), size) + text_width(m.group(2), size * 0.7) if m else text_width(s, size)
+    return text_width(s, size)
 
 
 def van_der_corput(i: int) -> float:
@@ -220,21 +214,41 @@ class SVG:
         tr = f' transform="rotate({rotate} {x:.2f} {y:.2f})"' if rotate is not None else ""
         db = f' dominant-baseline="{baseline}"' if baseline != "auto" else ""
         c = f' class="{cls}"' if cls else ""
-        m = re.fullmatch(r"(.*)<sup>(.*?)</sup>", s, flags=re.S) if rotate is None else None
-        if m:
-            # Exponent (10<sup>−3</sup>) as a second text element joined exactly at one x: shifted <tspan>s are
-            # misplaced by CairoSVG (PDF/PNG export) and superscript glyphs are missing from common fonts.
-            base, exp = m.group(1), m.group(2)
-            esz = size * 0.7
-            wb, we = text_width(base, size), text_width(exp, esz)
-            x0 = x + (wb - we) / 2 if anchor == "middle" else (x - we if anchor == "end" else x + wb)
-            self.add(f'<text x="{x0:.2f}" y="{y:.2f}" font-size="{size:.2f}" text-anchor="end" font-weight="{weight}"{db}{c}{extra}>{escape(base)}</text>')
-            self.add(f'<text x="{x0 + size * 0.04:.2f}" y="{y - size * 0.4:.2f}" font-size="{esz:.2f}" text-anchor="start" font-weight="{weight}"{db}>{escape(exp)}</text>')
+        if rt.is_rich(s):
+            self._rich_text(x, y, s, size, anchor, weight, rotate, db, c, extra)
             return
-        content = escape(superscript(s))
+        content = escape(html.unescape(s))
         self.add(
             f'<text x="{x:.2f}" y="{y:.2f}" font-size="{size:.2f}" text-anchor="{anchor}" font-weight="{weight}"{db}{tr}{c}{extra}>{content}</text>'
         )
+
+    def _rich_text(self, x, y, s, size, anchor, weight, rotate, db, c, extra):
+        """Styled text: every run is its own <text> at an absolute x measured with the real font metrics,
+        so the browser preview and the CairoSVG export (PDF/PNG) place it identically."""
+        fam = rt.family_key(self.cfg["font_family"])
+        runs = rt.parse(s)
+        ws = [rt.measure(t, rt.run_size(size, st), weight == "bold" or st.b, st.i, fam) for t, st in runs]
+        total = sum(ws)
+        cx = x - total / 2 if anchor == "middle" else (x - total if anchor == "end" else x)
+        if rotate is not None:
+            self.add(f'<g transform="rotate({rotate} {x:.2f} {y:.2f})">')
+        for n, ((t, st), w) in enumerate(zip(runs, ws)):
+            sz = rt.run_size(size, st)
+            dy = -size * 0.38 if st.shift == "sup" else (size * 0.2 if st.shift == "sub" else 0.0)
+            bold = weight == "bold" or st.b
+            attrs = f' font-weight="bold"' if bold else ' font-weight="normal"'
+            if st.i:
+                attrs += ' font-style="italic"'
+            if st.color:
+                attrs += f' fill="{escape(st.color)}"'
+            first = (c + extra) if n == 0 else ""
+            self.add(f'<text x="{cx:.2f}" y="{y + dy:.2f}" font-size="{sz:.2f}" text-anchor="start" xml:space="preserve"{attrs}{db}{first}>{escape(t)}</text>')
+            if st.u:
+                uy = y + dy + size * 0.13
+                self.add(f'<line x1="{cx:.2f}" y1="{uy:.2f}" x2="{cx + w:.2f}" y2="{uy:.2f}" stroke="{escape(st.color or "#000")}" stroke-width="{max(size * 0.06, 0.3):.2f}"/>')
+            cx += w
+        if rotate is not None:
+            self.add("</g>")
 
     def line(self, x1, y1, x2, y2, color="#000", width=None, extra=""):
         width = width or self.cfg["line_width_pt"]
@@ -408,7 +422,7 @@ def render_figure(content: dict, cfg_in: dict, results: dict[str, dict] | None =
         sel: list[Group] = [groups[n] for n in order if n in groups]
         if not sel:
             raise _err("No groups to plot. Check the table design.", "Aucun groupe à tracer. Vérifiez le plan du tableau.")
-        cap = caption(cfg, [(cfg["group_labels"].get(g.name, g.name), len(g.values)) for g in sel], lang)
+        cap = caption(cfg, [(rt.plain(cfg["group_labels"].get(g.name, g.name)), len(g.values)) for g in sel], lang)
         _render_groups(svg, cfg, sel, results, warnings)
     elif t in ("xy", "line"):
         cap = _render_xy(svg, cfg, content, warnings, lang)

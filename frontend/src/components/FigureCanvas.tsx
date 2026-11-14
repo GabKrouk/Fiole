@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
+import RichInput from "./RichText";
 
 export interface Selection {
   el: string; // title | y-axis | x-axis | y-label | x-label | frame | plot | group | group-label | pvalue | legend | annotation
@@ -139,13 +140,11 @@ export default function FigureCanvas({ svg, widthMm, zoom, selected, canEdit, ro
       <div dangerouslySetInnerHTML={{ __html: svg.replace(/width="[\d.]+mm" height="[\d.]+mm"/, 'width="100%"') }} />
       {tip && <div className="fig-tip" style={{ left: tip.x, top: tip.y }}>{tip.text}</div>}
       {edit && (
-        <input autoFocus className="fig-inline" style={{ left: edit.x, top: edit.y - 4, width: edit.w }} defaultValue={edit.value}
-          onClick={(e) => e.stopPropagation()}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") { edit.commit((e.target as HTMLInputElement).value); setEdit(null); }
-            if (e.key === "Escape") setEdit(null);
-          }}
-          onBlur={(e) => { edit.commit(e.target.value); setEdit(null); }} />
+        <div className="fig-inline" style={{ left: edit.x, top: Math.max(edit.y - 36, 0), width: Math.max(edit.w, 220) }}
+          onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
+          <RichInput autoFocus value={edit.value} ariaLabel="text"
+            onCommit={(v) => { edit.commit(v); setEdit(null); }} onCancel={() => setEdit(null)} />
+        </div>
       )}
     </div>
   );

@@ -6,6 +6,7 @@ import type { ProjectCtx } from "../pages/ProjectPage";
 import { groupNames, StepButtons } from "./AnalysisView";
 import { factorColumns, levels, numericColumns } from "../columns";
 import FigureCanvas, { Selection } from "./FigureCanvas";
+import RichInput from "./RichText";
 import Inspector, { figurePFormat, PFormat, StarThresholds } from "./Inspector";
 import type { Analysis } from "../api";
 
@@ -120,7 +121,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (e.target as HTMLElement).isContentEditable) return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") { e.preventDefault(); if (e.shiftKey) undoRef.current.redo(); else undoRef.current.undo(); }
       else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "y") { e.preventDefault(); undoRef.current.redo(); }
       else if (e.key === "Escape") setSelected(null);
@@ -382,11 +383,11 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
           <details open>
             <summary>{t("titles")}</summary>
             <div>
-              <label className="field"><span>{t("title")}</span><input value={cfg.title ?? ""} disabled={!canEdit} onChange={(e) => set({ title: e.target.value })} /></label>
+              <div className="field"><span>{t("title")}</span><RichInput ariaLabel={t("title")} value={cfg.title ?? ""} disabled={!canEdit} onChange={(v) => set({ title: v })} /></div>
               <div className="grid2">
-                <label className="field"><span>{t("yLabel")}</span><input value={cfg.y_label ?? ""} disabled={!canEdit} onChange={(e) => set({ y_label: e.target.value })} /></label>
+                <div className="field"><span>{t("yLabel")}</span><RichInput ariaLabel={t("yLabel")} value={cfg.y_label ?? ""} disabled={!canEdit} onChange={(v) => set({ y_label: v })} /></div>
                 <label className="field"><span>{t("unit")} Y</span><input value={cfg.y_unit ?? ""} disabled={!canEdit} onChange={(e) => set({ y_unit: e.target.value })} /></label>
-                <label className="field"><span>{t("xLabel")}</span><input value={cfg.x_label ?? ""} disabled={!canEdit} onChange={(e) => set({ x_label: e.target.value })} /></label>
+                <div className="field"><span>{t("xLabel")}</span><RichInput ariaLabel={t("xLabel")} value={cfg.x_label ?? ""} disabled={!canEdit} onChange={(v) => set({ x_label: v })} /></div>
                 {!isGroup && <label className="field"><span>{t("unit")} X</span><input value={cfg.x_unit ?? ""} disabled={!canEdit} onChange={(e) => set({ x_unit: e.target.value })} /></label>}
               </div>
             </div>
@@ -399,7 +400,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                   <div key={g} className="group-row">
                     <input type="color" className="swatch" aria-label={`color ${g}`} disabled={!canEdit} value={(cfg.colors ?? {})[g] ?? palette[i % palette.length]}
                       onChange={(e) => set({ colors: { ...(cfg.colors ?? {}), [g]: e.target.value } })} />
-                    <input value={(cfg.group_labels ?? {})[g] ?? g} disabled={!canEdit} aria-label={`label ${g}`} onChange={(e) => set({ group_labels: { ...(cfg.group_labels ?? {}), [g]: e.target.value } })} />
+                    <RichInput value={(cfg.group_labels ?? {})[g] ?? g} disabled={!canEdit} ariaLabel={`label ${g}`} onChange={(v) => set({ group_labels: { ...(cfg.group_labels ?? {}), [g]: v } })} />
                     <button className="ghost small" disabled={!canEdit || i === 0} aria-label="up" onClick={() => { const o = [...order]; [o[i - 1], o[i]] = [o[i], o[i - 1]]; set({ group_order: o }); }}>↑</button>
                     <button className="ghost small" disabled={!canEdit || i === order.length - 1} aria-label="down" onClick={() => { const o = [...order]; [o[i + 1], o[i]] = [o[i], o[i + 1]]; set({ group_order: o }); }}>↓</button>
                   </div>
@@ -548,7 +549,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
               {annotations.map((a, i) => a.type === "text" ? (
                 <div key={i} className="row" style={{ marginBottom: 6 }}>
                   <span className="badge manual">{t("manualTag")}</span>
-                  <input className="grow" value={a.text} disabled={!canEdit} onChange={(e) => { const n = [...annotations]; n[i] = { ...a, text: e.target.value }; set({ annotations: n }); }} />
+                  <RichInput className="grow" value={a.text ?? ""} disabled={!canEdit} onChange={(v) => { const n = [...annotations]; n[i] = { ...a, text: v }; set({ annotations: n }); }} />
                   <input type="number" style={{ width: 58 }} step={0.05} min={0} max={1} value={a.x} title="x (0–1)" disabled={!canEdit} onChange={(e) => { const n = [...annotations]; n[i] = { ...a, x: Number(e.target.value) }; set({ annotations: n }); }} />
                   <input type="number" style={{ width: 58 }} step={0.05} min={0} max={1} value={a.y} title="y (0–1)" disabled={!canEdit} onChange={(e) => { const n = [...annotations]; n[i] = { ...a, y: Number(e.target.value) }; set({ annotations: n }); }} />
                   <button className="ghost small" disabled={!canEdit} onClick={() => set({ annotations: annotations.filter((_, j) => j !== i) })}>×</button>
@@ -590,7 +591,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
           </div>
           <div className="row" style={{ marginTop: 8 }}>
             <span className="small-text muted grow">{t("previewNote")} {lang === "fr" ? "Cliquez un élément pour le modifier, double-cliquez un texte pour l’éditer, glissez titre, légende et textes." : "Click an element to edit it, double-click a text to edit it in place, drag the title, legend and texts."}</span>
-            {[1, 1.5, 2, 3].map((z) => <button key={z} className={`small ${zoom === z ? "primary" : ""}`} onClick={() => setZoom(z)}>{z * 100} %</button>)}
+            <div className="seg" role="group" aria-label="zoom">{[1, 1.5, 2, 3].map((z) => <button key={z} className={zoom === z ? "on" : ""} aria-pressed={zoom === z} onClick={() => setZoom(z)}>{z * 100} %</button>)}</div>
           </div>
           {selected && <div style={{ marginTop: 10 }}><Inspector sel={selected} cfg={cfg} set={set} canEdit={canEdit} isGroup={isGroup}
             colorOf={(g) => (cfg.colors ?? {})[g] ?? palette[Math.max(0, order.indexOf(g)) % palette.length]} rowLabel={rowLabel}

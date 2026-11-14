@@ -9,6 +9,7 @@ import AnalysisView from "../components/AnalysisView";
 import FigureView from "../components/FigureView";
 import ImportDialog from "../components/ImportDialog";
 import Modal from "../components/Modal";
+import { BUILD } from "../theme";
 
 export interface ProjectCtx {
   project: ProjectFull;
@@ -122,6 +123,13 @@ export default function ProjectPage() {
       <TopBar right={<button className="primary" onClick={() => setShareOpen(true)}>{t("share")}</button>}>
         <input className="name-input" value={name} onChange={(e) => setName(e.target.value)} onBlur={rename}
           onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} aria-label={t("projectName")} disabled={!canEdit} />
+        <nav className="nav-tabs" aria-label={t("projectName")}>
+          {([["data", t("data"), project.datasets], ["analysis", t("analyses"), project.analyses], ["figure", t("figures"), project.figures]] as [string, string, { id: string }[]][]).map(([k, label, items]) => {
+            const on = active.includes(`/${k}/`);
+            const target = on ? active : items.length ? `${base}/${k}/${items[items.length - 1].id}` : base;
+            return <a key={k} href={target} className={on ? "active" : ""} onClick={(e) => { e.preventDefault(); nav(target); }}>{label}<span className="count">{items.length}</span></a>;
+          })}
+        </nav>
       </TopBar>
       <div className="workspace">
         <nav className="sidebar" aria-label="Project">
@@ -172,6 +180,7 @@ export default function ProjectPage() {
               <span className="badge soon">{t("comments")}</span>
             </div>
           </section>
+          <div className="build-stamp" title="build">fiole · {BUILD}</div>
         </nav>
         <main className="main">
           <Routes>

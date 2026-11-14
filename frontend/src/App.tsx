@@ -1,3 +1,4 @@
+import { applyTheme, getTheme, Theme } from "./theme";
 import { createContext, useContext, useEffect, useState } from "react";
 import { Link, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { api, ApiError, User } from "./api";
@@ -25,6 +26,18 @@ export function Logo({ size = 22 }: { size?: number }) {
   );
 }
 
+function ThemeToggle() {
+  const { lang } = useI18n();
+  const [theme, setTheme] = useState<Theme>(getTheme());
+  const next: Theme = theme === "dark" ? "light" : "dark";
+  const label = lang === "fr" ? (next === "light" ? "Thème clair" : "Thème sombre") : (next === "light" ? "Light theme" : "Dark theme");
+  return (
+    <button className="icon-btn" title={label} aria-label={label} onClick={() => { applyTheme(next); setTheme(next); }}>
+      {theme === "dark" ? "☀" : "☾"}
+    </button>
+  );
+}
+
 export function TopBar({ children, right }: { children?: React.ReactNode; right?: React.ReactNode }) {
   const { user, setUser } = useAuth();
   const { t, lang, setLang } = useI18n();
@@ -37,6 +50,7 @@ export function TopBar({ children, right }: { children?: React.ReactNode; right?
       {children}
       <div className="spacer" />
       {right}
+      <ThemeToggle />
       <button className="ghost small" onClick={() => {
         const l = lang === "fr" ? "en" : "fr";
         setLang(l);
