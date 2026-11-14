@@ -31,6 +31,7 @@ const PALETTES: Record<string, string[]> = {
   tol_muted: ["#332288", "#88CCEE", "#44AA99", "#117733", "#999933", "#DDCC77", "#CC6677", "#882255", "#AA4499"],
   grayscale: ["#1A1A1A", "#737373", "#B3B3B3", "#404040", "#999999", "#D9D9D9"],
 };
+const Y_KEYS = ["y_min", "y_max", "y_tick_step", "y_scale", "y_label", "y_unit"];
 const GROUP_TYPES = ["scatter_groups", "bar", "box", "violin"];
 const XY_TYPES = ["xy", "line"];
 
@@ -246,6 +247,27 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     setStarsOpts({ mode: c.mode ?? "all", control: c.control ?? "", test: c.test ?? "welch", correction: c.correction ?? "holm" });
   }, [starsAnalysisId, ctx.project.analyses]);
 
+  // Axis scaling and significance stars belong to one Y variable. Switching Y saves them for the variable
+  // being left and restores those of the new one (or lets the axis autoscale if it was never adjusted).
+  function yKey(c: Cfg): string {
+    return GROUP_TYPES.includes(c.type ?? "scatter_groups") ? String(c.value_col ?? "") : (Array.isArray(c.y) ? c.y.join("+") : "");
+  }
+  function switchY(patch: Cfg) {
+    const oldK = yKey(cfg);
+    const newK = yKey({ ...cfg, ...patch });
+    if (oldK === newK) return set(patch);
+    const anns: Cfg[] = cfg.annotations ?? [];
+    const per: Record<string, Cfg> = { ...(cfg.per_y ?? {}) };
+    per[oldK] = { ...Object.fromEntries(Y_KEYS.map((k) => [k, cfg[k] ?? null])), annotations: anns.filter((a) => a.type === "pvalue") };
+    const saved = per[newK];
+    set({
+      ...patch,
+      ...Object.fromEntries(Y_KEYS.map((k) => [k, saved ? saved[k] ?? null : null])),
+      per_y: per,
+      annotations: [...anns.filter((a) => a.type !== "pvalue"), ...((saved?.annotations as Cfg[]) ?? [])],
+    });
+  }
+
   async function autoStars() {
     setStarsBusy(true);
     try {
@@ -260,7 +282,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
         const u = await api.put<Analysis>(`/api/projects/${pid}/analyses/${old.id}`, { config, version: old.version });
         aid = u.id;
       } else {
-        const a = await api.post<Analysis>(`/api/projects/${pid}/analyses`, { dataset_id: fig!.dataset_id, kind: "pairwise", name: `${lang === "fr" ? "Étoiles" : "Stars"} – ${fig!.name}`, config });
+        const a = await api.post<Analysis>(`/api/projects/${pid}/analyses`, { dataset_id: fig!.dataset_id, kind: "pairwise", name: `${lang === "fr" ? "Étoiles" : "Stars"} – ${fig!.name}${cfg.value_col ? ` – ${ds?.content.columns.find((c) => c.id === cfg.value_col)?.name ?? ""}` : ""}`, config });
         aid = a.id;
       }
       await api.post(`/api/projects/${pid}/analyses/${aid}/run`);
@@ -338,11 +360,11 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                     </select></label>
                   <label className="field"><span>{t("valueColPick")}</span>
                     <div className="row tight" style={{ flexWrap: "nowrap" }}>
-                      <select className="grow" value={cfg.value_col ?? ""} disabled={!canEdit} onChange={(e) => set({ value_col: e.target.value || null, ...(e.target.value ? {} : { group_col: null }) })}>
+                      <select className="grow" value={cfg.value_col ?? ""} disabled={!canEdit} onChange={(e) => switchY({ value_col: e.target.value || null, ...(e.target.value ? {} : { group_col: null }) })}>
                         <option value="">{t("useTableDesign")}</option>
                         {numericCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                       </select>
-                      {cfg.value_col && <StepButtons cols={numericCols.map((c) => c.id)} value={cfg.value_col} disabled={!canEdit} onChange={(v) => set({ value_col: v })} />}
+                      {cfg.value_col && <StepButtons cols={numericCols.map((c) => c.id)} value={cfg.value_col} disabled={!canEdit} onChange={(v) => switchY({ value_col: v })} />}
                     </div></label>
                 </>
               )}
@@ -356,7 +378,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                   {Array.isArray(cfg.y) && cfg.y.length === 1 && (
                     <div className="row tight" style={{ marginBottom: 8 }}>
                       <span className="small-text muted grow">Y : {numericCols.find((c) => c.id === cfg.y[0])?.name}</span>
-                      <StepButtons cols={numericCols.filter((c) => c.id !== cfg.x).map((c) => c.id)} value={cfg.y[0]} disabled={!canEdit} onChange={(v) => set({ y: [v] })} />
+                      <StepButtons cols={numericCols.filter((c) => c.id !== cfg.x).map((c) => c.id)} value={cfg.y[0]} disabled={!canEdit} onChange={(v) => switchY({ y: [v] })} />
                     </div>
                   )}
                   <label className="field"><span>{t("xColumn")}</span>

@@ -690,7 +690,8 @@ def _results_for(db: Session, project_id: str, cfg: dict) -> dict:
         if last is None:
             continue
         d = db.get(Dataset, a.dataset_id)
-        out[aid] = {"result": last.result, "stale": last.dataset_version != d.version or last.analysis_version != a.version}
+        out[aid] = {"result": last.result, "stale": last.dataset_version != d.version or last.analysis_version != a.version,
+                    "value_col": (a.config or {}).get("value_col"), "dataset_id": a.dataset_id}
     return out
 
 

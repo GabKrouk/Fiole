@@ -311,3 +311,17 @@ def test_rich_text_markup_parse_and_render():
     assert svg.count('font-style="italic"') == 2
     assert "&lt;i&gt;" not in svg  # markup never leaks as literal text
     assert "tga1: n = 10" in out["caption"] and "<i>" not in out["caption"]
+
+
+def test_stars_from_another_y_variable_are_not_drawn():
+    from app.figures.render import render_figure
+    c = _genotype_table()
+    res = run_analysis("pairwise", c, {"group_col": "g", "value_col": "a"})
+    ann = [{"type": "pvalue", "analysis_id": "A", "all": True}]
+    on_a = render_figure(c, {"type": "box", "group_col": "g", "value_col": "a", "annotations": ann},
+                         results={"A": {"result": res, "stale": False, "value_col": "a"}})
+    assert 'data-el="pvalue"' in on_a["svg"]
+    on_b = render_figure(c, {"type": "box", "group_col": "g", "value_col": "b", "annotations": ann},
+                         results={"A": {"result": res, "stale": False, "value_col": "a"}})
+    assert 'data-el="pvalue"' not in on_b["svg"]
+    assert any("another Y variable" in w["en"] for w in on_b["warnings"])

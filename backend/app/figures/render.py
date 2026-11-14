@@ -658,6 +658,11 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
     for k in sorted(p_idx, key=lambda j: (not all_ann[j].get("all"), -j)):  # "all pairs" sets first, newest first
         a = all_ann[k]
         entry = results.get(a.get("analysis_id"))
+        if entry and entry.get("value_col") and cfg.get("value_col") and entry["value_col"] != cfg["value_col"]:
+            # stars belong to the Y variable they were computed on: never draw them on another variable
+            warnings.append({"en": "Significance stars computed on another Y variable are hidden. Use “Add stars” for this variable.",
+                             "fr": "Les étoiles calculées sur une autre variable Y sont masquées. Utilisez « Ajouter les étoiles » pour cette variable."})
+            continue
         if not entry or entry["result"].get("status") != "ok":
             warnings.append({"en": "A p-value annotation refers to an analysis that has no valid result. Run the analysis first.",
                              "fr": "Une annotation de p renvoie à une analyse sans résultat valide. Lancez d’abord l’analyse."})
