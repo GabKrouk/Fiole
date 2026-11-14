@@ -59,6 +59,20 @@ export default function ResultView({ result: r, meta, stale }: { result: Analysi
         </div>
       )}
 
+      {r.kind === "pairwise" && r.comparisons && r.comparisons.length > 0 && (
+        <div style={{ overflowX: "auto", marginBottom: 12 }}>
+          <h4 style={{ marginTop: 0 }}>{lang === "fr" ? "Comparaisons" : "Comparisons"}{r.family && <span className="small-text muted"> · {r.family.size} · {lang === "fr" ? "correction" : "correction"} : {r.family.correction === "none" ? (lang === "fr" ? "aucune" : "none") : r.family.correction === "holm" ? "Holm" : "Bonferroni"}</span>}</h4>
+          <table className="stats">
+            <thead><tr><th>{lang === "fr" ? "Comparaison" : "Comparison"}</th><th>{lang === "fr" ? "Différence" : "Difference"}</th><th>{lang === "fr" ? "Statistique" : "Statistic"}</th><th>{t("df")}</th><th>{lang === "fr" ? "p brut" : "raw p"}</th><th>{lang === "fr" ? "p ajusté" : "adjusted p"}</th><th></th></tr></thead>
+            <tbody>{r.comparisons.map((c, i) => (
+              <tr key={i}><td>{c.group1} vs {c.group2}</td><td>{n(c.estimate ?? null)}</td><td>{c.statistic_name} = {n(c.statistic ?? null)}</td><td>{n(c.df ?? null)}</td>
+                <td>{c.p_raw_display ? fmtP(c.p_raw_display, lang) : "—"}</td><td><b>{fmtP(c.p_display, lang)}</b></td>
+                <td>{c.p < 0.0001 ? "****" : c.p < 0.001 ? "***" : c.p < 0.01 ? "**" : c.p < 0.05 ? "*" : "ns"}</td></tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+
       {r.coefficients && (
         <table className="stats" style={{ marginBottom: 12 }}>
           <thead><tr><th></th><th>{t("estimate")}</th><th>SE</th><th>t</th><th>{t("df")}</th><th>p</th><th>{t("ci")}</th></tr></thead>

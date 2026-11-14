@@ -595,3 +595,103 @@ def run_linear_regression(content: dict, config: dict) -> dict:
     res["result_text"] = {k: f"slope = {fmt(slope['estimate'])}, t({fmt(slope['df'])}) = {fmt(slope['t'])}, p = {slope['p_display']}, R² = {fmt(float(fit.rsquared))}".replace("p = <", "p <") for k in ("en",)}
     res["result_text"]["fr"] = res["result_text"]["en"].replace("slope", "pente")
     return res
+
+
+# ---------------------------------------------------------------- pairwise comparisons
+
+
+def p_adjust(ps: list[float], method: str) -> list[float]:
+    """Same definitions as R's p.adjust (holm, bonferroni, none)."""
+    m = len(ps)
+    if method == "none" or m <= 1:
+        return list(ps)
+    if method == "bonferroni":
+        return [min(1.0, p * m) for p in ps]
+    if method == "holm":
+        order = sorted(range(m), key=lambda i: ps[i])
+        out = [0.0] * m
+        running = 0.0
+        for rank, i in enumerate(order):
+            running = max(running, min(1.0, (m - rank) * ps[i]))
+            out[i] = running
+        return out
+    raise ValueError(method)
+
+
+CORR_TEXT = {
+    "holm": ("Holm–Bonferroni", "Holm–Bonferroni"),
+    "bonferroni": ("Bonferroni", "Bonferroni"),
+    "none": ("no correction", "aucune correction"),
+}
+PAIR_TEST = {
+    "welch": ("ttest", {"variant": "welch"}, ("Welch’s t-tests", "tests t de Welch")),
+    "student": ("ttest", {"variant": "student"}, ("Student’s t-tests", "tests t de Student")),
+    "paired": ("ttest", {"variant": "paired"}, ("paired t-tests", "tests t appariés")),
+    "mannwhitney": ("mannwhitney", {}, ("Mann–Whitney tests", "tests de Mann–Whitney")),
+    "wilcoxon": ("wilcoxon", {}, ("Wilcoxon signed-rank tests", "tests des rangs signés de Wilcoxon")),
+}
+
+
+def run_pairwise(content: dict, config: dict) -> dict:
+    res = _result("pairwise", ("Pairwise comparisons", "Comparaisons deux à deux"))
+    level = float(config.get("ci_level", 0.95))
+    test = config.get("test", "welch")
+    corr = config.get("correction", "holm")
+    mode = config.get("mode", "all")
+    if test not in PAIR_TEST or corr not in CORR_TEXT:
+        raise AnalysisError([msg("unknown_analysis", kind=f"pairwise/{test}/{corr}")])
+    groups = extract_groups(content, design_for(content, config))
+    names = [g for g in (config.get("groups") or list(groups.keys())) if g in groups]
+    if len(names) < 2:
+        raise AnalysisError([msg("need_two_groups")])
+    if mode == "control":
+        control = config.get("control") if config.get("control") in names else names[0]
+        pairs = [(control, n) for n in names if n != control]
+    else:
+        control = None
+        pairs = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
+    kind, extra, (t_en, t_fr) = PAIR_TEST[test]
+    for n in names:
+        g = average_technical(groups[n]) if config.get("average_technical") else groups[n]
+        res["groups"].append(_group_summary(g, level))
+    raw, rows = [], []
+    for a, b in pairs:
+        sub = dict(config, groups=[a, b], **extra)
+        r = run_ttest(content, sub) if kind == "ttest" else (run_mannwhitney(content, sub) if kind == "mannwhitney" else run_wilcoxon(content, sub))
+        rows.append((a, b, r))
+        raw.append(float(r["test"]["p"]))
+    adj = p_adjust(raw, corr)
+    seen_w = set()
+    for (a, b, r), p_raw, p in zip(rows, raw, adj):
+        res["comparisons"].append({
+            "group1": a, "group2": b, "statistic_name": r["test"]["statistic_name"], "statistic": r["test"]["statistic"],
+            "df": r["test"].get("df"), "p_raw": p_raw, "p": p, "p_display": format_p(p), "p_raw_display": format_p(p_raw),
+            "estimate": (r.get("estimate") or {}).get("value"), "effect_size": (r.get("effect_size") or {}).get("value"),
+        })
+        for w in r.get("warnings", []):
+            if w["code"] not in seen_w and w["code"] != "technical_averaged":
+                seen_w.add(w["code"])
+                res["warnings"].append(w)
+    m = len(pairs)
+    res["family"] = {"size": m, "mode": mode, "control": control, "correction": corr, "test": test}
+    c_en, c_fr = CORR_TEXT[corr]
+    fam_en = f"all {m} pairwise comparisons" if mode == "all" else f"{m} comparisons of each group with {control}"
+    fam_fr = f"les {m} comparaisons deux à deux" if mode == "all" else f"les {m} comparaisons de chaque groupe avec {control}"
+    res["assumptions"] = [
+        {"en": f"Family of comparisons: {fam_en}. p-values are adjusted with {c_en} within this family.",
+         "fr": f"Famille de comparaisons : {fam_fr}. Les valeurs de p sont ajustées par {c_fr} au sein de cette famille."},
+        {"en": "Each comparison uses only the two groups involved (no pooled variance across groups). An omnibus test (ANOVA / Kruskal–Wallis) is not part of this analysis yet.",
+         "fr": "Chaque comparaison n’utilise que les deux groupes concernés (pas de variance commune). Un test global (ANOVA / Kruskal–Wallis) n’est pas encore inclus."},
+    ]
+    if corr == "none" and m > 1:
+        res["warnings"].append({"code": "no_correction", "en": f"No multiple-comparison correction across {m} comparisons: the family-wise error rate is above 5%.",
+                                "fr": f"Aucune correction pour {m} comparaisons : le risque global d’erreur dépasse 5 %."})
+    res["method_text"] = {
+        "en": f"Groups were compared with two-sided {t_en} ({fam_en}); p-values were adjusted for multiple comparisons with the {c_en} method{'' if corr != 'none' else ''}.{_unit_phrase(config, 'en')}{_tech_phrase(config, 'en')}" + _footer("en"),
+        "fr": f"Les groupes ont été comparés par des {t_fr} bilatéraux ({fam_fr}) ; les valeurs de p ont été ajustées pour les comparaisons multiples par la méthode de {c_fr}.{_unit_phrase(config, 'fr')}{_tech_phrase(config, 'fr')}" + _footer("fr"),
+    }
+    if corr == "none":
+        res["method_text"] = {k: v.replace("; p-values were adjusted for multiple comparisons with the no correction method", "; p-values were not adjusted for multiple comparisons")
+                              .replace(" ; les valeurs de p ont été ajustées pour les comparaisons multiples par la méthode de aucune correction", " ; les valeurs de p n’ont pas été ajustées pour les comparaisons multiples")
+                              for k, v in res["method_text"].items()}
+    return res

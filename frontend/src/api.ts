@@ -97,7 +97,8 @@ export interface AnalysisResultData {
   n_pairs?: number;
   engine?: string;
   dataset?: { id: string; name: string; version: number };
-  comparisons?: { group1: string; group2: string; p: number; p_display: string }[];
+  comparisons?: { group1: string; group2: string; p: number; p_display: string; p_raw?: number; p_raw_display?: string; statistic_name?: string; statistic?: number | null; df?: number | null; estimate?: number | null }[];
+  family?: { size: number; mode: string; control?: string | null; correction: string; test: string };
   residuals?: { x: number; fitted: number; residual: number }[];
 }
 

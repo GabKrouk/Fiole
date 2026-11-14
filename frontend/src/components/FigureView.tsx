@@ -5,6 +5,17 @@ import { Key, useI18n } from "../i18n";
 import type { ProjectCtx } from "../pages/ProjectPage";
 import { groupNames, StepButtons } from "./AnalysisView";
 import { factorColumns, levels, numericColumns } from "../columns";
+import FigureCanvas, { Selection } from "./FigureCanvas";
+import Inspector, { StarThresholds } from "./Inspector";
+import type { Analysis } from "../api";
+
+const PRESETS: Record<string, { label: [string, string]; cfg: Record<string, unknown> }> = {
+  prism: { label: ["Classique (type Prism)", "Classic (Prism-like)"], cfg: { font_family: "Arial", font_size_pt: 10, title_size_pt: 12, line_width_pt: 1, tick_direction: "out", tick_length_pt: 4, frame: "open", point_size_pt: 5, minor_ticks: 0 } },
+  journal: { label: ["Revue (Nature / Cell)", "Journal (Nature / Cell)"], cfg: { font_family: "Arial", font_size_pt: 7, title_size_pt: 8, line_width_pt: 0.5, tick_direction: "out", tick_length_pt: 2, frame: "open", point_size_pt: 3, minor_ticks: 0 } },
+  boxed: { label: ["Encadré, graduations internes", "Boxed, inside ticks"], cfg: { frame: "closed", tick_direction: "in", tick_length_pt: 3, minor_ticks: 1, line_width_pt: 0.75 } },
+  poster: { label: ["Poster / présentation", "Poster / slides"], cfg: { font_size_pt: 14, title_size_pt: 16, line_width_pt: 1.5, point_size_pt: 7, tick_length_pt: 5 } },
+  minimal: { label: ["Minimal", "Minimal"], cfg: { frame: "open", tick_direction: "out", tick_length_pt: 2, minor_ticks: 0, line_width_pt: 0.5, fill_opacity: 0.15, palette: "grayscale" } },
+};
 
 const PALETTES: Record<string, string[]> = {
   okabe_ito: ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#56B4E9", "#CC79A7", "#F0E442", "#000000"],
@@ -35,8 +46,16 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   const [zoom, setZoom] = useState(1.5);
   const [dpi, setDpi] = useState(300);
   const [bg, setBg] = useState<"white" | "transparent">("white");
+  const [selected, setSelected] = useState<Selection | null>(null);
+  const [starsBusy, setStarsBusy] = useState(false);
+  const [starsOpts, setStarsOpts] = useState<{ mode: string; control: string; test: string; correction: string }>({ mode: "all", control: "", test: "welch", correction: "holm" });
+  const undoStack = useRef<Cfg[]>([]);
+  const redoStack = useRef<Cfg[]>([]);
+  const lastPush = useRef(0);
+  const [, force] = useState(0);
   const versionRef = useRef(initial?.version ?? 0);
   const saveTimer = useRef<number>();
+  const undoRef = useRef<{ undo: () => void; redo: () => void }>({ undo: () => {}, redo: () => {} });
   const renderTimer = useRef<number>();
 
   useEffect(() => {
@@ -84,6 +103,18 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     return ys.map(names);
   }, [ds, cfg]);
 
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") { e.preventDefault(); if (e.shiftKey) undoRef.current.redo(); else undoRef.current.undo(); }
+      else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "y") { e.preventDefault(); undoRef.current.redo(); }
+      else if (e.key === "Escape") setSelected(null);
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+
   if (!fig) return null;
 
   function persist(next: Cfg, extra: Partial<{ name: string; dataset_id: string }> = {}) {
@@ -102,9 +133,103 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   }
   const set = (p: Cfg) => {
     const next = { ...cfg, ...p };
+    // group rapid edits (typing, sliders) into one undo step
+    if (Date.now() - lastPush.current > 700) {
+      undoStack.current.push(cfg);
+      if (undoStack.current.length > 100) undoStack.current.shift();
+      redoStack.current = [];
+    }
+    lastPush.current = Date.now();
     setCfgState(next);
     persist(next);
   };
+  const undo = () => {
+    const prev = undoStack.current.pop();
+    if (!prev) return;
+    redoStack.current.push(cfg);
+    lastPush.current = 0;
+    setCfgState(prev);
+    persist(prev);
+    force((n) => n + 1);
+  };
+  const redo = () => {
+    const nxt = redoStack.current.pop();
+    if (!nxt) return;
+    undoStack.current.push(cfg);
+    lastPush.current = 0;
+    setCfgState(nxt);
+    persist(nxt);
+    force((n) => n + 1);
+  };
+  undoRef.current = { undo, redo };
+
+  const Wpt = ((cfg.width_mm ?? 80) * 72) / 25.4;
+  const Hpt = ((cfg.height_mm ?? 70) * 72) / 25.4;
+  function onDrag(s: Selection, dx: number, dy: number) {
+    if (s.el === "title") set({ title_dx: (cfg.title_dx ?? 0) + dx, title_dy: (cfg.title_dy ?? 0) + dy });
+    else if (s.el === "legend") set({ legend_dx: (cfg.legend_dx ?? 0) + dx, legend_dy: (cfg.legend_dy ?? 0) + dy });
+    else if (s.el === "annotation" && s.index !== undefined) {
+      const n = [...(cfg.annotations ?? [])];
+      const a = n[s.index];
+      n[s.index] = { ...a, x: Math.min(1, Math.max(0, (a.x ?? 0.5) + dx / Wpt)), y: Math.min(1, Math.max(0, (a.y ?? 0.1) + dy / Hpt)) };
+      set({ annotations: n });
+    }
+  }
+  function onInlineEdit(s: Selection) {
+    const autoName = (id?: string) => ds?.content.columns.find((c) => c.id === id)?.name ?? "";
+    switch (s.el) {
+      case "title": return { value: cfg.title ?? "", commit: (v: string) => set({ title: v }) };
+      case "x-label": return { value: cfg.x_label || autoName(isGroup ? cfg.group_col : cfg.x), commit: (v: string) => set({ x_label: v }) };
+      case "y-label": return { value: cfg.y_label || autoName(isGroup ? cfg.value_col : (cfg.y ?? [])[0]), commit: (v: string) => set({ y_label: v }) };
+      case "group-label": return { value: (cfg.group_labels ?? {})[s.group!] ?? s.group!, commit: (v: string) => set({ group_labels: { ...(cfg.group_labels ?? {}), [s.group!]: v } }) };
+      case "annotation": {
+        const k = s.index!;
+        return { value: (cfg.annotations ?? [])[k]?.text ?? "", commit: (v: string) => { const n = [...(cfg.annotations ?? [])]; n[k] = { ...n[k], text: v }; set({ annotations: n }); } };
+      }
+    }
+    return null;
+  }
+  function rowLabel(rowId: string) {
+    const rows = ds?.content.rows ?? [];
+    const i = rows.findIndex((r) => r.id === rowId);
+    return i < 0 ? "" : `${lang === "fr" ? "Ligne" : "Row"} ${i + 1}`;
+  }
+  async function excludeRow(rowId: string) {
+    const reason = window.prompt(t("excludeReason"));
+    if (!reason || !reason.trim()) return;
+    const d = await api.get<Dataset>(`/api/projects/${pid}/datasets/${fig!.dataset_id}`);
+    const content = { ...d.content, exclusions: [...d.content.exclusions.filter((e) => e.row_id !== rowId), { row_id: rowId, reason: reason.trim(), at: new Date().toISOString() }] };
+    await api.put(`/api/projects/${pid}/datasets/${d.id}`, { content, version: d.version, change_note: `exclude ${rowLabel(rowId)} from figure` });
+    setSelected(null);
+    await ctx.reload();
+  }
+  async function autoStars() {
+    setStarsBusy(true);
+    try {
+      const existing = annotations.findIndex((a) => a.type === "pvalue" && a.all);
+      const config = {
+        group_col: cfg.group_col ?? null, value_col: cfg.value_col ?? null, average_technical: !!cfg.average_technical,
+        groups: groups.length ? order : undefined, mode: starsOpts.mode, control: starsOpts.control || order[0], test: starsOpts.test, correction: starsOpts.correction,
+      };
+      let aid: string;
+      const old = existing >= 0 ? ctx.project.analyses.find((x) => x.id === annotations[existing].analysis_id) : undefined;
+      if (old) {
+        const u = await api.put<Analysis>(`/api/projects/${pid}/analyses/${old.id}`, { config, version: old.version });
+        aid = u.id;
+      } else {
+        const a = await api.post<Analysis>(`/api/projects/${pid}/analyses`, { dataset_id: fig!.dataset_id, kind: "pairwise", name: `${lang === "fr" ? "Étoiles" : "Stars"} – ${fig!.name}`, config });
+        aid = a.id;
+      }
+      await api.post(`/api/projects/${pid}/analyses/${aid}/run`);
+      const ann = { type: "pvalue", analysis_id: aid, all: true, format: "stars" };
+      set({ annotations: existing >= 0 ? annotations.map((a, i) => (i === existing ? { ...a, ...ann, format: a.format ?? "stars" } : a)) : [...annotations, ann] });
+      await ctx.reload();
+    } catch (e) {
+      setRenderErr(e instanceof ApiError ? JSON.stringify(e.detail) : String(e));
+    } finally {
+      setStarsBusy(false);
+    }
+  }
 
   const type: string = cfg.type ?? "scatter_groups";
   const isGroup = GROUP_TYPES.includes(type);
@@ -130,6 +255,14 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
         {fig.stale && <span className="badge stale" title={t("staleExplain")}>{t("stale")}</span>}
         <span className="small-text muted">{saved ? t("saved") : t("saving")}</span>
         <div className="grow" />
+        {canEdit && <>
+          <button className="small" onClick={undo} disabled={!undoStack.current.length} title="Ctrl/Cmd+Z">↶ {lang === "fr" ? "Annuler" : "Undo"}</button>
+          <button className="small" onClick={redo} disabled={!redoStack.current.length} title="Ctrl/Cmd+Shift+Z">↷ {lang === "fr" ? "Rétablir" : "Redo"}</button>
+          <select className="small" value="" onChange={(e) => e.target.value && set(PRESETS[e.target.value].cfg)} aria-label="style" style={{ fontSize: 12, padding: "3px 6px" }}>
+            <option value="">{lang === "fr" ? "Style rapide…" : "Quick style…"}</option>
+            {Object.entries(PRESETS).map(([k, p]) => <option key={k} value={k}>{p.label[lang === "fr" ? 0 : 1]}</option>)}
+          </select>
+        </>}
         {canEdit && <button className="small danger" onClick={async () => {
           if (!window.confirm(t("confirmDelete"))) return;
           await api.del(`/api/projects/${pid}/figures/${fig.id}`);
@@ -272,6 +405,23 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                   <div />
                   {field("xMin", "x_min")}{field("xMax", "x_max")}
                 </>}
+                <label className="field"><span>{lang === "fr" ? "Cadre" : "Frame"}</span>
+                  <select value={cfg.frame ?? "open"} disabled={!canEdit} onChange={(e) => set({ frame: e.target.value })}>
+                    <option value="open">└ {lang === "fr" ? "Ouvert (axes X et Y)" : "Open (X and Y axes)"}</option>
+                    <option value="closed">▢ {lang === "fr" ? "Fermé (4 côtés)" : "Closed (4 sides)"}</option></select></label>
+                <label className="field"><span>{lang === "fr" ? "Graduations" : "Tick marks"}</span>
+                  <select value={cfg.tick_direction ?? "out"} disabled={!canEdit} onChange={(e) => set({ tick_direction: e.target.value })}>
+                    <option value="out">{lang === "fr" ? "Extérieur" : "Outside"}</option><option value="in">{lang === "fr" ? "Intérieur" : "Inside"}</option><option value="none">{lang === "fr" ? "Aucune" : "None"}</option></select></label>
+                {field("lineWidth", "line_width_pt")}
+                <label className="field"><span>{lang === "fr" ? "Longueur graduations (pt)" : "Tick length (pt)"}</span>
+                  <input type="number" step={0.5} min={0} value={cfg.tick_length_pt ?? 3} disabled={!canEdit} onChange={(e) => set({ tick_length_pt: num(e.target.value) })} /></label>
+                <label className="field"><span>{lang === "fr" ? "Graduations mineures" : "Minor ticks"}</span>
+                  <select value={cfg.minor_ticks ?? 0} disabled={!canEdit} onChange={(e) => set({ minor_ticks: Number(e.target.value) })}>
+                    {[0, 1, 2, 3, 4, 9].map((n) => <option key={n} value={n}>{n}</option>)}</select></label>
+                <label className="field"><span>{lang === "fr" ? "Pas Y" : "Y step"}</span>
+                  <input type="number" step="any" value={cfg.y_tick_step ?? ""} disabled={!canEdit} onChange={(e) => set({ y_tick_step: num(e.target.value) })} /></label>
+                {!isGroup && <label className="field"><span>{lang === "fr" ? "Pas X" : "X step"}</span>
+                  <input type="number" step="any" value={cfg.x_tick_step ?? ""} disabled={!canEdit} onChange={(e) => set({ x_tick_step: num(e.target.value) })} /></label>}
               </div>
             </div>
           </details>
@@ -305,8 +455,39 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
             <div>
               {isGroup && (
                 <>
+                  <div className="stars-box">
+                    <b>★ {lang === "fr" ? "Étoiles de significativité automatiques" : "Automatic significance stars"}</b>
+                    <div className="grid2" style={{ marginTop: 6 }}>
+                      <label className="field"><span>{lang === "fr" ? "Comparer" : "Compare"}</span>
+                        <select value={starsOpts.mode} onChange={(e) => setStarsOpts({ ...starsOpts, mode: e.target.value })}>
+                          <option value="all">{lang === "fr" ? "Toutes les paires" : "All pairs"}</option>
+                          <option value="control">{lang === "fr" ? "Chaque groupe vs contrôle" : "Each group vs control"}</option></select></label>
+                      {starsOpts.mode === "control" ? <label className="field"><span>{lang === "fr" ? "Contrôle" : "Control"}</span>
+                        <select value={starsOpts.control || order[0]} onChange={(e) => setStarsOpts({ ...starsOpts, control: e.target.value })}>
+                          {order.map((g) => <option key={g}>{g}</option>)}</select></label> : <div />}
+                      <label className="field"><span>{t("testUsed")}</span>
+                        <select value={starsOpts.test} onChange={(e) => setStarsOpts({ ...starsOpts, test: e.target.value })}>
+                          <option value="welch">{lang === "fr" ? "t de Welch (non apparié)" : "Welch t (unpaired)"}</option>
+                          <option value="student">{lang === "fr" ? "t de Student" : "Student t"}</option>
+                          <option value="mannwhitney">Mann–Whitney</option>
+                          <option value="paired">{lang === "fr" ? "t apparié" : "Paired t"}</option>
+                          <option value="wilcoxon">{lang === "fr" ? "Wilcoxon apparié" : "Wilcoxon paired"}</option></select></label>
+                      <label className="field"><span>{lang === "fr" ? "Correction multiple" : "Multiple-comparison correction"}</span>
+                        <select value={starsOpts.correction} onChange={(e) => setStarsOpts({ ...starsOpts, correction: e.target.value })}>
+                          <option value="holm">Holm–Bonferroni ({lang === "fr" ? "recommandé" : "recommended"})</option>
+                          <option value="bonferroni">Bonferroni</option>
+                          <option value="none">{lang === "fr" ? "Aucune" : "None"}</option></select></label>
+                    </div>
+                    <StarThresholds cfg={cfg} set={set} canEdit={canEdit} />
+                    <label className="check"><input type="checkbox" disabled={!canEdit} checked={!!cfg.hide_ns} onChange={(e) => set({ hide_ns: e.target.checked })} /> {lang === "fr" ? "Masquer les comparaisons « ns »" : "Hide “ns” comparisons"}</label>
+                    <button className="primary small" disabled={!canEdit || starsBusy || order.length < 2} onClick={autoStars}>
+                      {starsBusy ? "…" : annotations.some((a) => a.type === "pvalue" && a.all) ? (lang === "fr" ? "Recalculer les étoiles" : "Recompute stars") : (lang === "fr" ? "Ajouter les étoiles" : "Add stars")}</button>
+                    <p className="small-text muted" style={{ marginTop: 6 }}>{lang === "fr"
+                      ? "Crée une analyse enregistrée « comparaisons deux à deux » (visible dans Analyses), avec la correction indiquée dans la légende."
+                      : "Creates a saved “pairwise comparisons” analysis (listed under Analyses); the correction is stated in the caption."}</p>
+                  </div>
                   <p className="small-text muted">{t("pOnlyFromAnalysis")}</p>
-                  {annotations.map((a, i) => a.type === "pvalue" ? (
+                  {annotations.map((a, i) => a.type === "pvalue" && !a.all ? (
                     <div key={i} className="row" style={{ marginBottom: 6 }}>
                       <select className="grow" value={a.analysis_id} disabled={!canEdit} onChange={(e) => { const n = [...annotations]; n[i] = { ...a, analysis_id: e.target.value }; set({ annotations: n }); }}>
                         {pAnalyses.map((x) => <option key={x.id} value={x.id}>{x.name} ({x.last_result!.result.comparisons![0].group1} vs {x.last_result!.result.comparisons![0].group2}) {x.status === "stale" ? `— ${t("stale")}` : ""}</option>)}
@@ -356,13 +537,17 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
         <div>
           <div className="fig-canvas">
             {renderErr ? <div className="notice error">{renderErr}</div> : (
-              <div className="sheet" style={{ width: `${w * zoom}mm` }} dangerouslySetInnerHTML={{ __html: svg.replace(/width="[\d.]+mm" height="[\d.]+mm"/, 'width="100%"') }} />
+              <FigureCanvas svg={svg} widthMm={w} zoom={zoom} selected={selected} canEdit={canEdit} rowLabel={rowLabel}
+                onSelect={setSelected} onDrag={onDrag} onInlineEdit={onInlineEdit} />
             )}
           </div>
           <div className="row" style={{ marginTop: 8 }}>
-            <span className="small-text muted grow">{t("previewNote")}</span>
+            <span className="small-text muted grow">{t("previewNote")} {lang === "fr" ? "Cliquez un élément pour le modifier, double-cliquez un texte pour l’éditer, glissez titre, légende et textes." : "Click an element to edit it, double-click a text to edit it in place, drag the title, legend and texts."}</span>
             {[1, 1.5, 2, 3].map((z) => <button key={z} className={`small ${zoom === z ? "primary" : ""}`} onClick={() => setZoom(z)}>{z * 100} %</button>)}
           </div>
+          {selected && <div style={{ marginTop: 10 }}><Inspector sel={selected} cfg={cfg} set={set} canEdit={canEdit} isGroup={isGroup}
+            colorOf={(g) => (cfg.colors ?? {})[g] ?? palette[Math.max(0, order.indexOf(g)) % palette.length]} rowLabel={rowLabel}
+            onShowRow={(r) => nav(`/p/${pid}/data/${fig.dataset_id}?row=${encodeURIComponent(r)}`)} onExcludeRow={excludeRow} onClose={() => setSelected(null)} /></div>}
           {warnings.map((w, i) => <div key={i} className="notice warn" style={{ marginTop: 8 }}>{L(w)}</div>)}
           {caption && <div className="panel" style={{ marginTop: 10 }}><h4>{t("caption")}</h4><p className="small-text" style={{ margin: 0 }}>{caption}</p></div>}
         </div>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { api, ApiError, Cell, Column, Dataset, Design, TableContent } from "../api";
 import { useI18n } from "../i18n";
 import type { ProjectCtx } from "../pages/ProjectPage";
@@ -34,6 +34,8 @@ type SaveState = "saved" | "dirty" | "saving" | "conflict" | "error";
 
 export default function DataView({ ctx }: { ctx: ProjectCtx }) {
   const { datasetId } = useParams();
+  const [search] = useSearchParams();
+  const flashRow = search.get("row");
   const { t, lang } = useI18n();
   const nav = useNavigate();
   const pid = ctx.project.id;
@@ -48,6 +50,12 @@ export default function DataView({ ctx }: { ctx: ProjectCtx }) {
   const pendingRef = useRef<{ content?: TableContent; name?: string } | null>(null);
   const timer = useRef<number | undefined>();
   const tableRef = useRef<HTMLTableElement>(null);
+
+  useEffect(() => {
+    if (!flashRow || !content) return;
+    const el = tableRef.current?.querySelector(`tr[data-rowid="${CSS.escape(flashRow)}"]`);
+    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [flashRow, !!content]);
 
   useEffect(() => {
     setDs(null);
@@ -324,7 +332,7 @@ export default function DataView({ ctx }: { ctx: ProjectCtx }) {
           </thead>
           <tbody>
             {content.rows.map((row, ri) => (
-              <tr key={row.id} className={excluded.has(row.id) ? "excluded" : ""} title={excluded.get(row.id) || ""}>
+              <tr key={row.id} data-rowid={row.id} className={`${excluded.has(row.id) ? "excluded" : ""} ${row.id === flashRow ? "row-flash" : ""}`} title={excluded.get(row.id) || ""}>
                 <td className="rowhead">
                   <span className="row tight" style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
                     {canEdit && <button className="ghost small" style={{ padding: "0 3px" }} title={excluded.has(row.id) ? t("include") : t("exclude")}

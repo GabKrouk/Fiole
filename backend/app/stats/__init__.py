@@ -13,6 +13,7 @@ from .analyses import (
     run_mannwhitney,
     run_ttest,
     run_wilcoxon,
+    run_pairwise,
 )
 from .core import clean
 
@@ -27,6 +28,9 @@ REGISTRY: dict[str, dict] = {
                     "label": {"en": "Mann–Whitney (unpaired, rank-based)", "fr": "Mann–Whitney (non apparié, rangs)"}, "family": "compare2"},
     "wilcoxon": {"run": run_wilcoxon, "input": "groups", "min_groups": 2, "max_groups": 2, "available": True, "paired": True,
                  "label": {"en": "Wilcoxon signed-rank (paired)", "fr": "Wilcoxon des rangs signés (apparié)"}, "family": "compare2"},
+    "pairwise": {"run": run_pairwise, "input": "groups", "min_groups": 2, "max_groups": None, "available": True,
+                 "label": {"en": "Pairwise comparisons (all pairs or vs control, Holm/Bonferroni)", "fr": "Comparaisons deux à deux (toutes paires ou vs contrôle, Holm/Bonferroni)"},
+                 "family": "compareN", "options": {"test": ["welch", "student", "paired", "mannwhitney", "wilcoxon"], "correction": ["holm", "bonferroni", "none"], "mode": ["all", "control"]}},
     "correlation": {"run": run_correlation, "input": "xy", "available": True,
                     "label": {"en": "Correlation (Pearson, Spearman)", "fr": "Corrélation (Pearson, Spearman)"}, "family": "xy",
                     "options": {"method": ["pearson", "spearman"]}},

@@ -110,3 +110,44 @@ def test_figure_column_driven_and_color_by():
     assert ">tga1<" in out["svg"] and ">Fresh weight<" in out["svg"] and ">Genotype<" in out["svg"]
     out = render_figure(c, {"type": "xy", "x": "a", "y": ["b"], "color_by": "g"})
     assert out["svg"].count("<path") >= 3 and ">tga4<" in out["svg"]  # one regression line + legend entry per genotype
+
+
+def test_figure_frame_ticks_and_tags():
+    from app.figures.render import render_figure, to_pdf
+    c = _genotype_table()
+    base = render_figure(c, {"type": "bar", "group_col": "g", "value_col": "b"})["svg"]
+    closed = render_figure(c, {"type": "bar", "group_col": "g", "value_col": "b", "frame": "closed", "minor_ticks": 1,
+                               "tick_direction": "in", "y_tick_step": 0.25, "title": "T", "title_dx": 10})["svg"]
+    assert 'data-el="frame"' in closed and 'data-el="frame"' not in base
+    assert closed.count("<line") > base.count("<line")
+    assert 'data-el="group"' in base and 'data-row="r0"' in base and 'data-el="y-axis"' in base
+    assert ">0.25<" in closed
+    assert to_pdf(closed).startswith(b"%PDF")
+    xy = render_figure(c, {"type": "xy", "x": "a", "y": ["b"], "color_by": "g", "legend_dx": -20, "legend_dy": 10, "x_tick_step": 0.5})["svg"]
+    assert 'data-el="legend"' in xy and 'data-x=' in xy
+
+
+def test_p_adjust_matches_r():
+    from app.stats.analyses import p_adjust
+    p = [0.01, 0.04, 0.03, 0.005, 0.2, 0.0004]
+    # R: p.adjust(p, "holm") and "bonferroni"
+    assert [round(x, 10) for x in p_adjust(p, "holm")] == [0.04, 0.09, 0.09, 0.025, 0.2, 0.0024]
+    assert [round(x, 10) for x in p_adjust(p, "bonferroni")] == [0.06, 0.24, 0.18, 0.03, 1.0, 0.0024]
+
+
+def test_pairwise_and_auto_stars():
+    from app.figures.render import render_figure, stars
+    c = _genotype_table()
+    r = run_analysis("pairwise", c, {"group_col": "g", "value_col": "b", "test": "welch", "correction": "holm", "mode": "all"})
+    assert r["status"] == "ok" and len(r["comparisons"]) == 3
+    single = run_analysis("ttest", c, {"group_col": "g", "value_col": "b", "groups": ["Col", "tga1"], "variant": "welch"})
+    cmp0 = r["comparisons"][0]
+    assert cmp0["p_raw"] == single["test"]["p"] and cmp0["p"] >= cmp0["p_raw"]
+    r2 = run_analysis("pairwise", c, {"group_col": "g", "value_col": "b", "mode": "control", "control": "tga4"})
+    assert [x["group1"] for x in r2["comparisons"]] == ["tga4", "tga4"]
+    assert stars(0.04) == "*" and stars(0.00005) == "****" and stars(0.2) == "ns" and stars(0.03, [0.1, 0.05]) == "**"
+    out = render_figure(c, {"type": "scatter_groups", "group_col": "g", "value_col": "b",
+                            "annotations": [{"type": "pvalue", "analysis_id": "A", "all": True, "format": "stars"}]},
+                        {"A": {"result": r, "stale": False}})
+    assert out["svg"].count('class="pvalue-bracket"') == 3
+    assert "Holm" in out["caption"] and "* p < 0.05" in out["caption"]

@@ -67,6 +67,16 @@ DEFAULTS = {
     "regression_line": True,
     "annotations": [],
     "background": "white",
+    # axes & frame (Prism-like)
+    "frame": "open",            # open = left + bottom axes; closed = box on four sides
+    "tick_direction": "out",    # out | in | none
+    "tick_length_pt": 3.0,
+    "minor_ticks": 0,           # minor ticks between two major ticks (numeric axes)
+    "y_tick_step": None,
+    "x_tick_step": None,
+    "fill_opacity": 0.3,
+    "title_dx": 0.0, "title_dy": 0.0,   # title offset (pt), set by dragging
+    "legend_dx": 0.0, "legend_dy": 0.0,  # legend offset (pt), set by dragging
 }
 
 ERROR_LABEL = {
@@ -170,6 +180,10 @@ def van_der_corput(i: int) -> float:
     return v
 
 
+def attr(v) -> str:
+    return escape(str(v), {'"': "&quot;"})
+
+
 class SVG:
     def __init__(self, w: float, h: float, cfg: dict):
         self.w, self.h, self.cfg = w, h, cfg
@@ -178,6 +192,14 @@ class SVG:
 
     def add(self, s: str):
         self.items.append(s)
+
+    def open(self, el: str, **data):
+        """Start a selectable element group: the editor uses data-el to know what was clicked."""
+        extra = "".join(f' data-{k.replace("_", "-")}="{attr(v)}"' for k, v in data.items() if v is not None)
+        self.add(f'<g data-el="{attr(el)}"{extra}>')
+
+    def close(self):
+        self.add("</g>")
 
     def text(self, x, y, s, size=None, anchor="middle", weight="normal", rotate=None, baseline="auto", cls="", extra=""):
         size = size or self.cfg["font_size_pt"]
@@ -196,7 +218,7 @@ class SVG:
         width = width or self.cfg["line_width_pt"]
         self.add(f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" stroke="{color}" stroke-width="{width:.2f}" stroke-linecap="butt"{extra}/>')
 
-    def marker(self, x, y, color, shape=None, size=None, opacity=None, filled=True):
+    def marker(self, x, y, color, shape=None, size=None, opacity=None, filled=True, extra=""):
         size = size or self.cfg["point_size_pt"]
         shape = shape or self.cfg["point_shape"]
         opacity = self.cfg["point_opacity"] if opacity is None else opacity
@@ -205,16 +227,16 @@ class SVG:
         sw = max(self.cfg["line_width_pt"] * 0.6, 0.3)
         common = f'fill="{fill}" fill-opacity="{opacity:.2f}" stroke="{color}" stroke-width="{sw:.2f}"'
         if shape == "square":
-            self.add(f'<rect x="{x - r * 0.9:.2f}" y="{y - r * 0.9:.2f}" width="{r * 1.8:.2f}" height="{r * 1.8:.2f}" {common}/>')
+            self.add(f'<rect x="{x - r * 0.9:.2f}" y="{y - r * 0.9:.2f}" width="{r * 1.8:.2f}" height="{r * 1.8:.2f}" {common}{extra}/>')
         elif shape == "triangle":
             h = r * 1.1
-            self.add(f'<polygon points="{x:.2f},{y - h:.2f} {x - h:.2f},{y + h * 0.8:.2f} {x + h:.2f},{y + h * 0.8:.2f}" {common}/>')
+            self.add(f'<polygon points="{x:.2f},{y - h:.2f} {x - h:.2f},{y + h * 0.8:.2f} {x + h:.2f},{y + h * 0.8:.2f}" {common}{extra}/>')
         elif shape == "diamond":
-            self.add(f'<polygon points="{x:.2f},{y - r * 1.2:.2f} {x + r:.2f},{y:.2f} {x:.2f},{y + r * 1.2:.2f} {x - r:.2f},{y:.2f}" {common}/>')
+            self.add(f'<polygon points="{x:.2f},{y - r * 1.2:.2f} {x + r:.2f},{y:.2f} {x:.2f},{y + r * 1.2:.2f} {x - r:.2f},{y:.2f}" {common}{extra}/>')
         elif shape == "open_circle":
-            self.add(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{r:.2f}" fill="none" stroke="{color}" stroke-width="{sw * 1.4:.2f}"/>')
+            self.add(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{r:.2f}" fill="none" stroke="{color}" stroke-width="{sw * 1.4:.2f}"{extra}/>')
         else:
-            self.add(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{r:.2f}" {common}/>')
+            self.add(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{r:.2f}" {common}{extra}/>')
 
     def render(self) -> str:
         wmm, hmm = self.cfg["width_mm"], self.cfg["height_mm"]
@@ -237,7 +259,7 @@ def _err(en: str, fr: str) -> FigureError:
 
 def merged_config(cfg: dict) -> dict:
     out = dict(DEFAULTS)
-    out.update({k: v for k, v in (cfg or {}).items() if v is not None or k in ("y_min", "y_max", "x_min", "x_max")})
+    out.update({k: v for k, v in (cfg or {}).items() if v is not None or k in ("y_min", "y_max", "x_min", "x_max", "y_tick_step", "x_tick_step")})
     out["width_mm"] = float(min(max(out["width_mm"], 20), 500))
     out["height_mm"] = float(min(max(out["height_mm"], 20), 500))
     return out
@@ -302,21 +324,18 @@ def caption(cfg: dict, groups: list[tuple[str, int]], lang: str) -> str:
     return f"{parts}. {ns}."
 
 
-def stars(p: float) -> str:
-    if p < 0.0001:
-        return "****"
-    if p < 0.001:
-        return "***"
-    if p < 0.01:
-        return "**"
-    if p < 0.05:
-        return "*"
-    return "ns"
+DEFAULT_STARS = [0.05, 0.01, 0.001, 0.0001]  # GraphPad Prism default thresholds
 
 
-def p_label(p: float, p_display: str, style: str) -> str:
+def stars(p: float, thresholds=None) -> str:
+    th = sorted([float(t) for t in (thresholds or DEFAULT_STARS)], reverse=True)
+    n = sum(1 for t in th if p < t)
+    return "*" * n if n else "ns"
+
+
+def p_label(p: float, p_display: str, style: str, thresholds=None) -> str:
     if style == "stars":
-        return stars(p)
+        return stars(p, thresholds)
     if p_display.startswith("<"):
         m, e = p_display[2:].split("e")
         return f"p < {m}×10<sup>{int(e)}</sup>".replace("-", "−")
@@ -366,10 +385,32 @@ def render_figure(content: dict, cfg_in: dict, results: dict[str, dict] | None =
     else:
         raise _err(f"Unknown figure type {t}.", f"Type de figure inconnu {t}.")
 
-    for a in cfg.get("annotations") or []:
+    for k, a in enumerate(cfg.get("annotations") or []):
         if a.get("type") == "text" and a.get("text"):
             # Manual annotation: kept identifiable in the SVG and the caption.
-            svg.text(a.get("x", 0.5) * W, a.get("y", 0.1) * H, a["text"], size=a.get("size_pt", fs), cls="manual-annotation", extra=' data-manual="true"')
+            svg.open("annotation", index=k, drag="annotation")
+            svg.text(a.get("x", 0.5) * W, a.get("y", 0.1) * H, a["text"], size=a.get("size_pt", fs), weight="bold" if a.get("bold") else "normal",
+                     cls="manual-annotation", extra=' data-manual="true"')
+            svg.close()
+    p_anns = [a for a in cfg.get("annotations") or [] if a.get("type") == "pvalue" and results.get(a.get("analysis_id"))]
+    if p_anns:
+        tests = []
+        for a in p_anns:
+            r = results[a["analysis_id"]]["result"]
+            t_name = (r.get("title") or {}).get(lang, "")
+            fam = r.get("family")
+            if fam:
+                corr = {"holm": "Holm", "bonferroni": "Bonferroni", "none": "sans correction" if lang == "fr" else "no correction"}[fam["correction"]]
+                t_name += f" ({fam['test']}, {corr})"
+            if t_name and t_name not in tests:
+                tests.append(t_name)
+        cap += (" Tests : " if lang == "fr" else " Tests: ") + "; ".join(tests) + "."
+        if any(a.get("format") == "stars" for a in p_anns):
+            th = sorted([float(t) for t in (cfg.get("star_thresholds") or DEFAULT_STARS)], reverse=True)
+            parts = [f"{'*' * (i + 1)} p < {t:g}" for i, t in enumerate(th)]
+            ns = f"ns p ≥ {th[0]:g}"
+            txt = ", ".join(parts) + (f", {ns}" if not cfg.get("hide_ns") else "")
+            cap += f" {txt}." if lang == "en" else f" {txt.replace('.', ',')}."
     if any(a.get("type") == "text" and a.get("text") for a in cfg.get("annotations") or []):
         cap += " Manual annotation(s) added by the author." if lang == "en" else " Annotation(s) manuelle(s) ajoutée(s) par l’auteur."
     return {"svg": svg.render(), "caption": cap, "warnings": warnings}
@@ -385,7 +426,7 @@ def _frame(svg: SVG, cfg: dict, n_cats: int | None, xlabels: list[str] | None, y
     ylab = cfg["y_label"] + (f" ({cfg['y_unit']})" if cfg["y_unit"] else "")
     left = 3 + (fs * 1.4 if ylab else 0) + ytick_w + fs * 0.6 + 3
     # x labels: rotate if they do not fit
-    bottom_pad = fs * 1.8
+    bottom_pad = fs * 1.8 + max(tick_span(cfg)[0] - 3, 0)
     rotate = False
     if xlabels is not None and n_cats:
         avail = (W - left - 6) / n_cats
@@ -400,21 +441,38 @@ def _frame(svg: SVG, cfg: dict, n_cats: int | None, xlabels: list[str] | None, y
         raise _err("The figure is too small for its text. Increase the size or reduce the font.", "La figure est trop petite pour son texte. Agrandissez-la ou réduisez la police.")
 
     ys = Scale(ylo, yhi, bottom, top, log)
-    # title
+    out, _inn = tick_span(cfg)
+    # transparent plot area: clicking it selects the frame / axes settings
+    svg.add(f'<rect data-el="plot" x="{left:.2f}" y="{top:.2f}" width="{right - left:.2f}" height="{bottom - top:.2f}" fill="#FFFFFF" fill-opacity="0"/>')
+    # title (draggable)
     if cfg["title"]:
-        svg.text((left + right) / 2, 4 + cfg["title_size_pt"], cfg["title"], size=cfg["title_size_pt"], weight="bold")
+        svg.open("title", drag="title")
+        svg.text((left + right) / 2 + float(cfg.get("title_dx") or 0), 4 + cfg["title_size_pt"] + float(cfg.get("title_dy") or 0), cfg["title"], size=cfg["title_size_pt"], weight="bold")
+        svg.close()
     # y axis
+    svg.open("y-axis")
     svg.line(left, top, left, bottom, width=lw)
+    draw_y_ticks(svg, cfg, left, ys, yticks, ylo, yhi, log)
     for v in yticks:
-        y = ys(v)
-        svg.line(left - 3, y, left, y, width=lw)
-        svg.text(left - 4.5, y + fs * 0.35, fmt_tick(v), anchor="end")
+        svg.text(left - out - 1.5, ys(v) + fs * 0.35, fmt_tick(v), anchor="end")
+    svg.close()
     if ylab:
+        svg.open("y-label")
         svg.text(3 + fs * 0.85, (top + bottom) / 2, ylab, rotate=-90)
-    # x axis
+        svg.close()
+    # x axis line (ticks are drawn by the caller)
+    svg.open("x-axis")
     svg.line(left, bottom, right, bottom, width=lw)
+    svg.close()
+    if cfg.get("frame") == "closed":
+        svg.open("frame")
+        svg.line(left, top, right, top, width=lw)
+        svg.line(right, top, right, bottom, width=lw)
+        svg.close()
     if xlab:
+        svg.open("x-label")
         svg.text((left + right) / 2, H - 3 - fs * 0.3, xlab)
+        svg.close()
     return left, right, top, bottom, ys, rotate
 
 
@@ -449,17 +507,127 @@ def _y_axis(cfg: dict, lo: float, hi: float, include_zero: bool, warnings: list)
     if yhi <= ylo:
         yhi = ylo + 1
         ticks = ticks_in(ylo, yhi)
+    ticks = stepped_ticks(ylo, yhi, cfg.get("y_tick_step")) or ticks
     return ylo, yhi, ticks, False
+
+
+def stepped_ticks(lo: float, hi: float, step) -> list[float] | None:
+    try:
+        step = float(step) if step else None
+    except (TypeError, ValueError):
+        step = None
+    if not step or step <= 0 or (hi - lo) / step > 200:
+        return None
+    start = math.ceil(lo / step - 1e-9) * step
+    out, v = [], start
+    while v <= hi + step * 1e-9:
+        out.append(round(v, 10))
+        v += step
+    return out
+
+
+def minor_positions(ticks: list[float], n: int, log: bool, lo: float, hi: float) -> list[float]:
+    if n <= 0 or len(ticks) < 1:
+        return []
+    out = []
+    if log:
+        for t in ticks:
+            for m in range(2, 10):
+                v = t * m
+                if lo <= v <= hi:
+                    out.append(v)
+        return out
+    if len(ticks) < 2:
+        return []
+    step = ticks[1] - ticks[0]
+    sub = step / (n + 1)
+    v = ticks[0] - step
+    while v <= hi + 1e-12:
+        for k in range(1, n + 1):
+            w = v + k * sub
+            if lo - 1e-12 <= w <= hi + 1e-12:
+                out.append(w)
+        v += step
+    return out
+
+
+def tick_span(cfg: dict) -> tuple[float, float]:
+    """Return (outward, inward) extent of a major tick from the axis line."""
+    L = float(cfg.get("tick_length_pt") or 3.0)
+    d = cfg.get("tick_direction", "out")
+    if d == "in":
+        return 0.0, L
+    if d == "none":
+        return 0.0, 0.0
+    return L, 0.0
+
+
+def draw_y_ticks(svg, cfg, left, ys, ticks, lo, hi, log):
+    out, inn = tick_span(cfg)
+    lw = cfg["line_width_pt"]
+    for v in ticks:
+        if out or inn:
+            svg.line(left - out, ys(v), left + inn, ys(v), width=lw)
+    for v in minor_positions(ticks, int(cfg.get("minor_ticks") or 0), log, lo, hi):
+        if out or inn:
+            svg.line(left - out * 0.55, ys(v), left + inn * 0.55, ys(v), width=lw * 0.8)
+
+
+def draw_x_ticks(svg, cfg, bottom, xs, ticks, lo, hi, log):
+    out, inn = tick_span(cfg)
+    lw = cfg["line_width_pt"]
+    for v in ticks:
+        if out or inn:
+            svg.line(xs(v), bottom - inn, xs(v), bottom + out, width=lw)
+    for v in minor_positions(ticks, int(cfg.get("minor_ticks") or 0), log, lo, hi):
+        if out or inn:
+            svg.line(xs(v), bottom - inn * 0.55, xs(v), bottom + out * 0.55, width=lw * 0.8)
 
 
 def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warnings: list):
     fs = cfg["font_size_pt"]
     lw = cfg["line_width_pt"]
     lo, hi = _group_values_range(sel, cfg)
-    pvals = [a for a in cfg.get("annotations") or [] if a.get("type") == "pvalue"]
+    all_ann = cfg.get("annotations") or []
+    names = [g.name for g in sel]
+    brackets = []  # (annotation index, comparison, stale)
+    for k, a in enumerate(all_ann):
+        if a.get("type") != "pvalue":
+            continue
+        entry = results.get(a.get("analysis_id"))
+        if not entry or entry["result"].get("status") != "ok":
+            warnings.append({"en": "A p-value annotation refers to an analysis that has no valid result. Run the analysis first.",
+                             "fr": "Une annotation de p renvoie à une analyse sans résultat valide. Lancez d’abord l’analyse."})
+            continue
+        comps = entry["result"].get("comparisons") or []
+        if not a.get("all"):
+            pick = next((c for c in comps if {c["group1"], c["group2"]} == {a.get("group1"), a.get("group2")}), None)
+            comps = [pick or (comps[0] if comps else None)] if comps else []
+        shown = [c for c in comps if c and c["group1"] in names and c["group2"] in names]
+        if len(shown) < len([c for c in comps if c]):
+            warnings.append({"en": "Some compared groups are not shown in this figure.", "fr": "Certains groupes comparés ne sont pas affichés dans cette figure."})
+        if entry.get("stale"):
+            warnings.append({"en": "A p-value shown comes from an analysis computed on an older version of the data or settings. Re-run it.",
+                             "fr": "Une valeur de p affichée provient d’une analyse calculée sur une ancienne version des données ou des réglages. Relancez-la."})
+        for c in shown:
+            label = p_label(c["p"], c["p_display"], a.get("format", "exact"), cfg.get("star_thresholds"))
+            if label == "ns" and cfg.get("hide_ns"):
+                continue
+            brackets.append((k, c, label))
+    # Stack brackets: short spans first, each on the lowest level where it does not overlap another.
+    placed: list[tuple[int, int, int]] = []  # (i1, i2, level)
+    layout = []
+    for k, c, label in sorted(brackets, key=lambda b: abs(names.index(b[1]["group1"]) - names.index(b[1]["group2"]))):
+        i1, i2 = sorted([names.index(c["group1"]), names.index(c["group2"])])
+        lvl = 0
+        while any(l == lvl and not (i2 < a1 or i1 > a2) for a1, a2, l in placed):
+            lvl += 1
+        placed.append((i1, i2, lvl))
+        layout.append((k, c, label, i1, i2, lvl))
+    n_levels = max((l for *_, l in layout), default=-1) + 1
     span = (hi - lo) or 1.0
     # Reserve headroom for brackets
-    hi_ext = hi + span * 0.12 * len(pvals) if pvals and cfg["y_scale"] != "log10" else hi
+    hi_ext = hi + span * 0.13 * n_levels if n_levels and cfg["y_scale"] != "log10" else hi
     ylo, yhi, yticks, log = _y_axis(cfg, lo, hi_ext, include_zero=cfg["type"] == "bar", warnings=warnings)
     labels = [cfg["group_labels"].get(g.name, g.name) for g in sel]
     left, right, top, bottom, ys, rotate = _frame(svg, cfg, len(sel), labels, ylo, yhi, yticks, log)
@@ -473,14 +641,18 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
         cx = left + band * (i + 0.5)
         centers[g.name] = cx
         color = color_for(cfg, g.name, i)
-        vals = [v for v in g.values if not (log and v <= 0)]
+        keep = [k for k, v in enumerate(g.values) if not (log and v <= 0)]
+        vals = [g.values[k] for k in keep]
+        rids = [g.row_ids[k] if k < len(g.row_ids) else "" for k in keep]
         half = band * 0.32
+        fo = float(cfg.get("fill_opacity", 0.3))
+        svg.open("group", group=g.name, index=i)
         if t == "bar":
             c, el, eh = _center_error(vals, cfg["center"], cfg["error"])
             if c is not None:
                 base = ys(max(ylo, 0) if not log else ylo)
                 yc = ys(c)
-                svg.add(f'<rect x="{cx - half:.2f}" y="{min(yc, base):.2f}" width="{2 * half:.2f}" height="{abs(base - yc):.2f}" fill="{color}" fill-opacity="0.35" stroke="{color}" stroke-width="{lw:.2f}"/>')
+                svg.add(f'<rect x="{cx - half:.2f}" y="{min(yc, base):.2f}" width="{2 * half:.2f}" height="{abs(base - yc):.2f}" fill="{color}" fill-opacity="{fo:.2f}" stroke="{color}" stroke-width="{lw:.2f}"/>')
                 _errbar(svg, cx, ys, el, eh, half * 0.45, lw, "#000")
         elif t == "box" and len(vals) >= 1:
             a = np.asarray(vals)
@@ -488,7 +660,7 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
             iqr = q3 - q1
             lo_w = a[a >= q1 - 1.5 * iqr].min()
             hi_w = a[a <= q3 + 1.5 * iqr].max()
-            svg.add(f'<rect x="{cx - half:.2f}" y="{ys(q3):.2f}" width="{2 * half:.2f}" height="{abs(ys(q1) - ys(q3)):.2f}" fill="{color}" fill-opacity="0.25" stroke="{color}" stroke-width="{lw:.2f}"/>')
+            svg.add(f'<rect x="{cx - half:.2f}" y="{ys(q3):.2f}" width="{2 * half:.2f}" height="{abs(ys(q1) - ys(q3)):.2f}" fill="{color}" fill-opacity="{fo:.2f}" stroke="{color}" stroke-width="{lw:.2f}"/>')
             svg.line(cx - half, ys(med), cx + half, ys(med), color=color, width=lw * 1.8)
             svg.line(cx, ys(q3), cx, ys(hi_w), color=color)
             svg.line(cx, ys(q1), cx, ys(lo_w), color=color)
@@ -507,55 +679,50 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
             dens = dens / dens.max() * half * 1.1
             pts_r = [f"{cx + d:.2f},{ys(v):.2f}" for v, d in zip(grid, dens)]
             pts_l = [f"{cx - d:.2f},{ys(v):.2f}" for v, d in zip(grid[::-1], dens[::-1])]
-            svg.add(f'<polygon points="{" ".join(pts_r + pts_l)}" fill="{color}" fill-opacity="0.25" stroke="{color}" stroke-width="{lw:.2f}"/>')
+            svg.add(f'<polygon points="{" ".join(pts_r + pts_l)}" fill="{color}" fill-opacity="{fo:.2f}" stroke="{color}" stroke-width="{lw:.2f}"/>')
             med = float(np.median(a))
             md = float(kde(np.log10(med) if log else med)[0] / kde(np.log10(grid) if log else grid).max() * half * 1.1)
             svg.line(cx - md, ys(med), cx + md, ys(med), color=color, width=lw * 1.8)
         # individual points
         if cfg["show_points"] or t == "scatter_groups":
-            _points(svg, cfg, vals, cx, band, ys, color)
+            _points(svg, cfg, vals, cx, band, ys, color, rids)
         if t == "scatter_groups":
             c, el, eh = _center_error(vals, cfg["center"], cfg["error"])
             if c is not None:
                 svg.line(cx - half * 0.75, ys(c), cx + half * 0.75, ys(c), color="#000", width=lw * 1.6)
                 _errbar(svg, cx, ys, el, eh, half * 0.35, lw, "#000")
+        svg.close()
     svg.add("</g>")
-    # x tick labels
+    # x tick marks and group labels
+    out, inn = tick_span(cfg)
+    svg.open("x-axis")
     for i, g in enumerate(sel):
         cx = left + band * (i + 0.5)
-        svg.line(cx, bottom, cx, bottom + 3, width=lw)
+        if out or inn:
+            svg.line(cx, bottom - inn, cx, bottom + out, width=lw)
+    svg.close()
+    for i, g in enumerate(sel):
+        cx = left + band * (i + 0.5)
         lab = labels[i]
+        svg.open("group-label", group=g.name)
         if rotate:
-            svg.text(cx + fs * 0.3, bottom + 5, lab, anchor="end", rotate=-45, baseline="hanging")
+            svg.text(cx + fs * 0.3, bottom + out + 2, lab, anchor="end", rotate=-45, baseline="hanging")
         else:
-            svg.text(cx, bottom + 4.5 + fs, lab)
+            svg.text(cx, bottom + out + 1.5 + fs, lab)
+        svg.close()
 
-    # p-value brackets: only from saved analysis results
-    level = 0
-    for a in pvals:
-        entry = results.get(a.get("analysis_id"))
-        if not entry or entry["result"].get("status") != "ok":
-            warnings.append({"en": "A p-value annotation refers to an analysis that has no valid result. Run the analysis first.",
-                             "fr": "Une annotation de p renvoie à une analyse sans résultat valide. Lancez d’abord l’analyse."})
-            continue
-        comp = next((c for c in entry["result"].get("comparisons", []) if {c["group1"], c["group2"]} == {a.get("group1"), a.get("group2")}), None)
-        if comp is None:
-            comp = (entry["result"].get("comparisons") or [None])[0]
-        if comp is None or comp["group1"] not in centers or comp["group2"] not in centers:
-            warnings.append({"en": "The compared groups are not shown in this figure.", "fr": "Les groupes comparés ne sont pas affichés dans cette figure."})
-            continue
-        if entry.get("stale"):
-            warnings.append({"en": "A p-value shown comes from an analysis computed on an older version of the data. Re-run it.",
-                             "fr": "Une valeur de p affichée provient d’une analyse calculée sur une ancienne version des données. Relancez-la."})
-        x1, x2 = sorted([centers[comp["group1"]], centers[comp["group2"]]])
-        ybase = ys(hi) - 6 - level * (fs * 2.2)
+    # p-value brackets / stars: only from saved analysis results
+    for k, c, label, i1, i2, lvl in layout:
+        x1, x2 = left + band * (i1 + 0.5), left + band * (i2 + 0.5)
+        ybase = ys(hi) - 6 - lvl * (fs * 2.0)
         tick = 3
+        svg.open("pvalue", index=k)
         svg.add(
             f'<path d="M{x1 + 2:.2f},{ybase + tick:.2f} L{x1 + 2:.2f},{ybase:.2f} L{x2 - 2:.2f},{ybase:.2f} L{x2 - 2:.2f},{ybase + tick:.2f}" '
-            f'fill="none" stroke="#000" stroke-width="{lw:.2f}" class="pvalue-bracket" data-analysis-id="{escape(a.get("analysis_id", ""))}"/>'
+            f'fill="none" stroke="#000" stroke-width="{lw:.2f}" class="pvalue-bracket" data-analysis-id="{attr(all_ann[k].get("analysis_id", ""))}"/>'
         )
-        svg.text((x1 + x2) / 2, ybase - 2.5, p_label(comp["p"], comp["p_display"], a.get("format", "exact")), cls="pvalue-label")
-        level += 1
+        svg.text((x1 + x2) / 2, ybase - (1.2 if label.startswith("*") else 2.5), label, cls="pvalue-label")
+        svg.close()
 
 
 def _errbar(svg: SVG, cx: float, ys, el, eh, cap: float, lw: float, color: str):
@@ -566,12 +733,13 @@ def _errbar(svg: SVG, cx: float, ys, el, eh, cap: float, lw: float, color: str):
     svg.line(cx - cap, ys(eh), cx + cap, ys(eh), color=color, width=lw)
 
 
-def _points(svg: SVG, cfg: dict, vals: list[float], cx: float, band: float, ys, color: str):
+def _points(svg: SVG, cfg: dict, vals: list[float], cx: float, band: float, ys, color: str, row_ids: list[str] | None = None):
     width = band * 0.32 * cfg["jitter"]
     order = np.argsort(vals)
     for k, idx in enumerate(order):
         off = (van_der_corput(k) - 0.5) * 2 * width if len(vals) > 1 else 0.0
-        svg.marker(cx + off, ys(vals[idx]), color)
+        rid = row_ids[idx] if row_ids and idx < len(row_ids) else ""
+        svg.marker(cx + off, ys(vals[idx]), color, extra=f' data-row="{attr(rid)}" data-v="{vals[idx]:.6g}"')
 
 
 def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) -> str:
@@ -583,6 +751,7 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
         raise _err("Choose an X column and at least one Y column.", "Choisissez une colonne X et au moins une colonne Y.")
     excl = excluded_row_ids(content)
     series = []
+    rows_of: dict[str, list[str]] = {}
     color_by = cfg.get("color_by") if col_by_id(content, cfg.get("color_by")) else None
     for yc in ycols:
         col = col_by_id(content, yc)
@@ -604,6 +773,7 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
                 else:
                     key = col["name"]
                 by_level.setdefault(key, []).append((float(x), float(y)))
+                rows_of.setdefault(key, []).append(row["id"])
         series.extend(by_level.items())
     order = cfg.get("group_order")
     if order:
@@ -643,19 +813,25 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
     left, right, top, bottom, ys, _ = _frame(svg, cfg, None, None, ylo, yhi, yticks, ylog)
     xs = Scale(xlo, xhi, left + 4, right - 4, xlog)
     fs, lw = cfg["font_size_pt"], cfg["line_width_pt"]
+    if not xlog:
+        xticks = stepped_ticks(xlo, xhi, cfg.get("x_tick_step")) or xticks
+    out, _inn = tick_span(cfg)
+    svg.open("x-axis")
+    draw_x_ticks(svg, cfg, bottom, xs, xticks, xlo, xhi, xlog)
     for v in xticks:
-        x = xs(v)
-        svg.line(x, bottom, x, bottom + 3, width=lw)
-        svg.text(x, bottom + 4.5 + fs, fmt_tick(v))
+        svg.text(xs(v), bottom + out + 1.5 + fs, fmt_tick(v))
+    svg.close()
     svg.add(f'<clipPath id="plotclip"><rect x="{left:.2f}" y="{top - 1:.2f}" width="{right - left:.2f}" height="{bottom - top + 1:.2f}"/></clipPath>')
     svg.add('<g clip-path="url(#plotclip)">')
     counts = []
     for i, (name, pts) in enumerate(series):
         color = color_for(cfg, name, i)
         counts.append((name, len(pts)))
+        svg.open("group", group=name, index=i)
+        rids = rows_of.get(name, [])
         if t == "xy":
-            for x, y in pts:
-                svg.marker(xs(x), ys(y), color)
+            for k, (x, y) in enumerate(pts):
+                svg.marker(xs(x), ys(y), color, extra=f' data-row="{attr(rids[k] if k < len(rids) else "")}" data-v="{y:.6g}" data-x="{x:.6g}"')
             if cfg["regression_line"] and len(pts) >= 2 and np.ptp([p[0] for p in pts]) > 0:
                 X = np.array([p[0] for p in pts])
                 Y = np.array([p[1] for p in pts])
@@ -673,17 +849,23 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
                 _errbar(svg, xs(x), ys, el, eh, 2.0, lw, color)
                 svg.marker(xs(x), ys(c), color, opacity=1.0)
             if cfg["show_points"]:
-                for x, y in pts:
-                    svg.marker(xs(x), ys(y), color, size=cfg["point_size_pt"] * 0.6, opacity=0.4)
+                for k, (x, y) in enumerate(pts):
+                    svg.marker(xs(x), ys(y), color, size=cfg["point_size_pt"] * 0.6, opacity=0.4,
+                               extra=f' data-row="{attr(rids[k] if k < len(rids) else "")}" data-v="{y:.6g}" data-x="{x:.6g}"')
+        svg.close()
     svg.add("</g>")
     if (cfg["legend"] == "auto" and len(series) > 1) or cfg["legend"] is True:
+        lx = right - max(text_width(n, fs) for n, _ in series) - 14
         ly = top + 2
+        lx += float(cfg.get("legend_dx") or 0)
+        ly += float(cfg.get("legend_dy") or 0)
+        svg.open("legend", drag="legend")
         for i, (name, _) in enumerate(series):
             color = color_for(cfg, name, i)
-            lx = right - max(text_width(n, fs) for n, _ in series) - 14
             svg.marker(lx, ly + fs * 0.5, color)
             svg.text(lx + 6, ly + fs * 0.85, name, anchor="start")
             ly += fs * 1.4
+        svg.close()
     return caption(cfg, counts, lang)
 
 

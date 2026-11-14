@@ -30,7 +30,7 @@ export function groupNames(c: TableContent | undefined, cfg?: Record<string, any
 
 export default function AnalysisView({ ctx }: { ctx: ProjectCtx }) {
   const { analysisId } = useParams();
-  const { t, L } = useI18n();
+  const { t, L, lang } = useI18n();
   const nav = useNavigate();
   const pid = ctx.project.id;
   const canEdit = ctx.project.permissions.includes("edit");
@@ -62,7 +62,7 @@ export default function AnalysisView({ ctx }: { ctx: ProjectCtx }) {
   const spec = ctx.types.find((x) => x.kind === a.kind);
   const cfg = a.config;
   const isXY = spec?.input === "xy";
-  const pairedDesign: boolean = cfg.paired_design ?? (a.kind === "wilcoxon" || cfg.variant === "paired");
+  const pairedDesign: boolean = cfg.paired_design ?? (a.kind === "wilcoxon" || cfg.variant === "paired" || (a.kind === "pairwise" && (cfg.test === "paired" || cfg.test === "wilcoxon")));
 
   function save(patch: Partial<Analysis>) {
     const next = { ...a!, ...patch } as Analysis;
@@ -164,8 +164,8 @@ export default function AnalysisView({ ctx }: { ctx: ProjectCtx }) {
             {a.kind !== "descriptive" && (
               <div className="field"><span>{t("independentOrPaired")}</span>
                 <div className="row">
-                  <label className="check" style={{ marginBottom: 0 }}><input type="radio" disabled={!canEdit} checked={!pairedDesign} onChange={() => setCfg({ paired_design: false, ...(a.kind === "ttest" ? { variant: "welch" } : {}) })} /> {t("independent")}</label>
-                  <label className="check" style={{ marginBottom: 0 }}><input type="radio" disabled={!canEdit} checked={pairedDesign} onChange={() => setCfg({ paired_design: true, ...(a.kind === "ttest" ? { variant: "paired" } : {}) })} /> {t("pairedQ")}</label>
+                  <label className="check" style={{ marginBottom: 0 }}><input type="radio" disabled={!canEdit} checked={!pairedDesign} onChange={() => setCfg({ paired_design: false, ...(a.kind === "ttest" ? { variant: "welch" } : {}), ...(a.kind === "pairwise" ? { test: "welch" } : {}) })} /> {t("independent")}</label>
+                  <label className="check" style={{ marginBottom: 0 }}><input type="radio" disabled={!canEdit} checked={pairedDesign} onChange={() => setCfg({ paired_design: true, ...(a.kind === "ttest" ? { variant: "paired" } : {}), ...(a.kind === "pairwise" ? { test: "paired" } : {}) })} /> {t("pairedQ")}</label>
                 </div>
               </div>
             )}
@@ -194,7 +194,7 @@ export default function AnalysisView({ ctx }: { ctx: ProjectCtx }) {
                 </div></label>
             </div>
             <div className="field"><span>{t("groupsToCompare")}</span>
-              {a.kind === "descriptive" ? (
+              {a.kind === "descriptive" || a.kind === "pairwise" ? (
                 <div className="row">{groups.map((g) => (
                   <label key={g} className="check" style={{ marginBottom: 0 }}><input type="checkbox" disabled={!canEdit} checked={!cfg.groups || cfg.groups.includes(g)}
                     onChange={(e) => { const cur: string[] = cfg.groups ?? groups; setCfg({ groups: e.target.checked ? [...cur, g] : cur.filter((x) => x !== g) }); }} /> {g}</label>
@@ -219,6 +219,28 @@ export default function AnalysisView({ ctx }: { ctx: ProjectCtx }) {
               <select value={cfg.y || ""} disabled={!canEdit} onChange={(e) => setCfg({ y: e.target.value })}><option value="">—</option>{numericCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
             {a.kind === "correlation" && <label className="field"><span>{t("method")}</span>
               <select value={cfg.method || "pearson"} disabled={!canEdit} onChange={(e) => setCfg({ method: e.target.value })}><option value="pearson">Pearson</option><option value="spearman">Spearman</option></select></label>}
+          </div>
+        )}
+        {a.kind === "pairwise" && (
+          <div className="grid2">
+            <label className="field"><span>{lang === "fr" ? "Comparer" : "Compare"}</span>
+              <select value={cfg.mode || "all"} disabled={!canEdit} onChange={(e) => setCfg({ mode: e.target.value })}>
+                <option value="all">{lang === "fr" ? "Toutes les paires" : "All pairs"}</option>
+                <option value="control">{lang === "fr" ? "Chaque groupe vs contrôle" : "Each group vs control"}</option></select></label>
+            {(cfg.mode || "all") === "control" ? <label className="field"><span>{lang === "fr" ? "Contrôle" : "Control"}</span>
+              <select value={cfg.control || groups[0] || ""} disabled={!canEdit} onChange={(e) => setCfg({ control: e.target.value })}>
+                {groups.map((g) => <option key={g}>{g}</option>)}</select></label> : <div />}
+            <label className="field"><span>{t("testUsed")}</span>
+              <select value={cfg.test || "welch"} disabled={!canEdit} onChange={(e) => setCfg({ test: e.target.value, paired_design: e.target.value === "paired" || e.target.value === "wilcoxon" })}>
+                <option value="welch">{lang === "fr" ? "t de Welch (non apparié)" : "Welch t (unpaired)"}</option>
+                <option value="student">{lang === "fr" ? "t de Student" : "Student t"}</option>
+                <option value="mannwhitney">Mann–Whitney</option>
+                <option value="paired">{lang === "fr" ? "t apparié" : "Paired t"}</option>
+                <option value="wilcoxon">{lang === "fr" ? "Wilcoxon apparié" : "Wilcoxon paired"}</option></select></label>
+            <label className="field"><span>{lang === "fr" ? "Correction multiple" : "Multiple-comparison correction"}</span>
+              <select value={cfg.correction || "holm"} disabled={!canEdit} onChange={(e) => setCfg({ correction: e.target.value })}>
+                <option value="holm">Holm–Bonferroni</option><option value="bonferroni">Bonferroni</option>
+                <option value="none">{lang === "fr" ? "Aucune" : "None"}</option></select></label>
           </div>
         )}
         <div className="grid3">
