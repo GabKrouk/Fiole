@@ -6,6 +6,7 @@ import { useI18n } from "./i18n";
 import AuthPage from "./pages/AuthPage";
 import Dashboard from "./pages/Dashboard";
 import ProjectPage from "./pages/ProjectPage";
+import ConnectPage from "./pages/ConnectPage";
 import { AccountDialog } from "./components/Account";
 
 interface AuthCtx {
@@ -107,6 +108,7 @@ export default function App() {
         <Route path="/login" element={user ? <Navigate to="/" /> : <AuthPage />} />
         <Route path="/" element={user ? <Dashboard /> : <Navigate to="/login" />} />
         <Route path="/p/:projectId/*" element={user ? <ProjectPage /> : <Navigate to="/login" state={{ from: location.pathname + location.search }} />} />
+        <Route path="/connect" element={user ? <ConnectPage /> : <Navigate to="/login" state={{ from: location.pathname + location.search }} />} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </AuthContext.Provider>

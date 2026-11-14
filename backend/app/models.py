@@ -82,6 +82,27 @@ class AuthSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ToolToken(Base):
+    """A sign-in on another tool of gab's (Régine, GeneCloud…) with the Fiole account ("Se connecter avec le compte Fiole").
+    The token only proves who the user is (GET /api/sso/me); it gives no access to Fiole's projects."""
+    __tablename__ = "tool_tokens"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    tool: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ToolAccount(Base):
+    """One row per (user, tool) the account was used on: when it was last reported to tools-usage."""
+    __tablename__ = "tool_accounts"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    tool: Mapped[str] = mapped_column(String(32), primary_key=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Project(Base):
     __tablename__ = "projects"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
