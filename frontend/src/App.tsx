@@ -16,7 +16,7 @@ interface AuthCtx {
 const AuthContext = createContext<AuthCtx>({ user: null, setUser: () => {} });
 export const useAuth = () => useContext(AuthContext);
 
-export function Logo({ size = 22 }: { size?: number }) {
+export function Logo({ size = 26 }: { size?: number }) {
   // Original mark: a blue flask holding a small yellow bar chart, in a circle.
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
