@@ -206,7 +206,14 @@ def project_summary(db: Session, p: Project, user: User, member: ProjectMember |
 
 
 @app.get("/api/projects")
-def list_projects(scope: Literal["mine", "shared", "recent"] = "mine", user: User = Depends(current_user), db: Session = Depends(get_db)):
+def list_projects(scope: Literal["mine", "shared", "recent", "trash"] = "mine", user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if scope == "trash":
+        rows = db.execute(
+            select(Project, ProjectMember).join(ProjectMember, ProjectMember.project_id == Project.id)
+            .where(ProjectMember.user_id == user.id, Project.owner_id == user.id, Project.deleted_at.is_not(None))
+            .order_by(Project.deleted_at.desc())
+        ).all()
+        return [{**project_summary(db, p, user, m), "deleted_at": p.deleted_at.isoformat()} for p, m in rows]
     q = (
         select(Project, ProjectMember)
         .join(ProjectMember, ProjectMember.project_id == Project.id)
@@ -335,6 +342,42 @@ def delete_project(project_id: str, user: User = Depends(current_user), db: Sess
     audit(db, user, p.id, "project.delete", "project", p.id)
     db.commit()
     return {"ok": True}
+
+
+def _own_trashed(db: Session, user: User, project_id: str) -> Project:
+    p = db.get(Project, project_id)
+    if p is None or p.owner_id != user.id or p.deleted_at is None:
+        raise HTTPException(404, detail={"code": "project_not_found"})
+    return p
+
+
+@app.post("/api/projects/{project_id}/restore")
+def restore_project(project_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Take a project out of the trash."""
+    p = _own_trashed(db, user, project_id)
+    p.deleted_at = None
+    audit(db, user, p.id, "project.restore", "project", p.id)
+    db.commit()
+    return {"ok": True, "url": f"/p/{p.id}"}
+
+
+@app.delete("/api/projects/{project_id}/permanent")
+def purge_project(project_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Delete for good a project that is already in the trash (owner only)."""
+    p = _own_trashed(db, user, project_id)
+    audit(db, user, None, "project.purge", "project", p.id, name=p.name)
+    db.delete(p)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/projects/{project_id}/duplicate")
+def duplicate_project(project_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """A full copy (data, analyses, figures, layouts) owned by me, not shared with anyone."""
+    p = require(db, user, project_id, Action.EXPORT)
+    doc = _archive_doc(db, p)
+    doc["project"]["name"] = (f"{p.name} (copie)" if user.locale == "fr" else f"{p.name} (copy)")[:300]
+    return _import_doc(db, user, doc, "project.duplicate")
 
 
 def touch(p: Project):
@@ -1634,6 +1677,12 @@ ARCHIVE_VERSION = 1
 @app.get("/api/projects/{project_id}/archive")
 def export_archive(project_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     p = require(db, user, project_id, Action.EXPORT)
+    doc = _archive_doc(db, p)
+    return Response(json.dumps(doc, ensure_ascii=False, indent=1), media_type="application/json",
+                    headers={"Content-Disposition": disposition(_safe(p.name) + f".fiole.json")})
+
+
+def _archive_doc(db: Session, p: Project) -> dict:
     datasets = db.execute(select(Dataset).where(Dataset.project_id == p.id)).scalars().all()
     analyses = db.execute(select(Analysis).where(Analysis.project_id == p.id)).scalars().all()
     figures = db.execute(select(Figure).where(Figure.project_id == p.id)).scalars().all()
@@ -1652,8 +1701,7 @@ def export_archive(project_id: str, user: User = Depends(current_user), db: Sess
         "figures": [{"id": f.id, "dataset_id": f.dataset_id, "name": f.name, "config": f.config} for f in figures],
         "layouts": [{"name": x.name, "config": x.config} for x in db.execute(select(Layout).where(Layout.project_id == p.id)).scalars()],
     }
-    return Response(json.dumps(doc, ensure_ascii=False, indent=1), media_type="application/json",
-                    headers={"Content-Disposition": disposition(_safe(p.name) + f".fiole.json")})
+    return doc
 
 
 @app.post("/api/projects/import-archive")
@@ -1664,6 +1712,10 @@ async def import_archive(file: UploadFile = File(...), user: User = Depends(curr
         raise HTTPException(422, detail={"code": "archive_unreadable"})
     if doc.get("format") != ARCHIVE_FORMAT:
         raise HTTPException(422, detail={"code": "archive_unreadable"})
+    return _import_doc(db, user, doc, "project.import_archive")
+
+
+def _import_doc(db: Session, user: User, doc: dict, action: str) -> dict:
     p = Project(name=doc["project"]["name"], description=doc["project"].get("description", ""), owner_id=user.id)
     db.add(p)
     db.flush()
@@ -1697,7 +1749,7 @@ async def import_archive(file: UploadFile = File(...), user: User = Depends(curr
         lc = dict(lay.get("config") or {})
         lc["panels"] = [{**pn, "figure_id": f_map[pn.get("figure_id")]} for pn in lc.get("panels") or [] if pn.get("figure_id") in f_map]
         db.add(Layout(project_id=p.id, name=lay.get("name") or "Layout", config=layout_lib.merged(lc)))
-    audit(db, user, p.id, "project.import_archive", "project", p.id)
+    audit(db, user, p.id, action, "project", p.id)
     db.commit()
     # Results are recomputed rather than trusted from the file.
     for old_id, new_id in a_map.items():
