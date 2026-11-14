@@ -348,3 +348,31 @@ def test_paste_larger_than_one_megabyte():
     assert r.status_code == 200, r.text[:300]
     j = r.json()
     assert len(j["rows"]) == 4000 and len(j["columns"]) == 32 and j["detected"]["delimiter"] == ";"
+
+
+def test_trash_restore_purge_and_duplicate_project():
+    c = client("trash@example.org")
+    pid = c.post("/api/projects", json={"name": "Old"}).json()["id"]
+    content = {"columns": [{"id": "a", "name": "A", "type": "numeric"}, {"id": "b", "name": "B", "type": "numeric"}],
+               "rows": [{"id": f"r{i}", "cells": {"a": i, "b": i * 2.5}} for i in range(6)], "design": {"layout": "wide", "group_columns": ["a", "b"]}}
+    did = c.post(f"/api/projects/{pid}/datasets", json={"name": "T", "content": content}).json()["id"]
+    c.post(f"/api/projects/{pid}/figures", json={"dataset_id": did, "name": "F", "config": {"type": "bar", "annotations": [{"type": "pvalue", "all": True}]}})
+    # duplicate: full copy owned by me
+    dup = c.post(f"/api/projects/{pid}/duplicate").json()
+    copy = c.get(dup["url"].replace("/p/", "/api/projects/")).json()
+    assert copy["name"] == "Old (copie)" and len(copy["datasets"]) == 1 and len(copy["figures"]) == 1
+    # trash: hidden everywhere, listed in the trash, restorable
+    assert c.delete(f"/api/projects/{pid}").status_code == 200
+    assert pid not in [p["id"] for p in c.get("/api/projects?scope=mine").json()]
+    trash = c.get("/api/projects?scope=trash").json()
+    assert [p["id"] for p in trash] == [pid] and trash[0]["deleted_at"]
+    assert c.get(f"/api/projects/{pid}").status_code == 404
+    assert c.post(f"/api/projects/{pid}/restore").status_code == 200
+    assert pid in [p["id"] for p in c.get("/api/projects?scope=mine").json()]
+    # permanent delete only from the trash, only by the owner
+    assert c.delete(f"/api/projects/{pid}/permanent").status_code == 404
+    c.delete(f"/api/projects/{pid}")
+    other = client("not-owner@example.org")
+    assert other.delete(f"/api/projects/{pid}/permanent").status_code == 404
+    assert c.delete(f"/api/projects/{pid}/permanent").status_code == 200
+    assert c.get("/api/projects?scope=trash").json() == []

@@ -10,6 +10,7 @@ import FigureView from "../components/FigureView";
 import LayoutView from "../components/LayoutView";
 import ImportDialog from "../components/ImportDialog";
 import ShareDialog from "../components/ShareDialog";
+import ProjectMenu from "../components/ProjectMenu";
 import NoAccess from "../components/NoAccess";
 import { BUILD } from "../theme";
 import Modal from "../components/Modal";
@@ -243,7 +244,8 @@ export default function ProjectPage() {
     <>
       <TopBar right={<>
         {myRole !== "owner" && <span className={`badge ${canEdit ? "ok" : ""}`} title={`${t("owner")} : ${project.owner.display_name}`}>{roleName(myRole)}{project.via_link ? (lang === "fr" ? " · via le lien" : " · via link") : ""}</span>}
-        <button className="primary" onClick={() => setShareOpen(true)}>🔒 {t("share")}</button></>}>
+        <button className="primary" onClick={() => setShareOpen(true)}>🔒 {t("share")}</button>
+        <ProjectMenu inProject project={project} onChanged={reload} onShare={() => setShareOpen(true)} toast={(m, u) => showToast(m, u, u ? 8000 : 2200)} /></>}>
         <input className="name-input" value={name} onChange={(e) => setName(e.target.value)} onBlur={rename}
           onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} aria-label={t("projectName")} disabled={!canEdit} />
         <nav className="nav-tabs" aria-label={t("projectName")}>
@@ -306,7 +308,6 @@ export default function ProjectPage() {
             <div className="soon-list" style={{ padding: "0 6px" }}>
               {types.filter((x) => !x.available).map((x) => <span key={x.kind} className="badge soon" title={t("comingSoon")}>{L(x.label)}</span>)}
               <span className="badge soon">{t("transformations")}</span>
-              <span className="badge soon">{t("duplicate")}</span>
               <span className="badge soon">{t("comments")}</span>
             </div>
           </section>

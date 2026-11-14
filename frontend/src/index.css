@@ -463,3 +463,20 @@ button.ghost.danger:hover:not(:disabled) { background: var(--danger-soft); borde
 @media (prefers-reduced-motion: reduce) { .fig-skeleton { animation: none; } .switch-track, .switch-track::after { transition: none; } }
 button.wrap-btn { white-space: normal; text-align: left; line-height: 1.35; border-radius: 10px !important; }
 .side-item:disabled { white-space: normal; flex-wrap: wrap; line-height: 1.35; }
+
+/* ---- project "⋯" menu and trash */
+.project-card { position: relative; }
+.project-card .name { padding-right: 30px; }
+.pmenu { position: relative; display: inline-block; }
+.project-card .pmenu { position: absolute; top: 8px; right: 8px; }
+.pmenu-btn { font-size: 18px; line-height: 1; padding: 2px 8px !important; border-radius: 8px !important; color: var(--ink-2); }
+.pmenu-list { right: 0; top: calc(100% + 4px); min-width: 230px; padding: 5px; border-radius: 10px; }
+.pmenu-list button, .pmenu-list .menu-link { display: block; width: 100%; text-align: left; border: none !important; padding: 7px 10px; background: none !important; border-radius: 6px; font-size: 13px; color: var(--ink); text-decoration: none; cursor: pointer; }
+.pmenu-list button:hover, .pmenu-list .menu-link:hover { background: var(--surface-2) !important; }
+.pmenu-list button.danger { color: var(--danger); }
+.pmenu-list button.danger:hover { background: var(--danger-soft) !important; }
+.menu-sep { height: 1px; background: var(--line-2); margin: 4px 2px; }
+.project-card.trashed { border-top-color: var(--line); opacity: 0.9; }
+.tabs .tab-trash { margin-left: auto; }
+.project-card .card-delete { margin-top: 10px; color: var(--ink-3); background: transparent !important; border: 1px solid var(--line) !important; }
+.project-card .card-delete:hover { color: var(--danger); border-color: var(--danger) !important; background: var(--danger-soft) !important; }
