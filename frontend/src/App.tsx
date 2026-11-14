@@ -16,17 +16,10 @@ interface AuthCtx {
 const AuthContext = createContext<AuthCtx>({ user: null, setUser: () => {} });
 export const useAuth = () => useContext(AuthContext);
 
+// Original mark: a glassy blue flask holding a small yellow bar chart, in a circle (same drawing as favicon.svg).
+const LOGO_SVG = `<defs><radialGradient id="fbg" cx="0.35" cy="0.3" r="0.8"><stop offset="0" stop-color="#ffffff"/><stop offset="0.6" stop-color="#e3ebff"/><stop offset="1" stop-color="#b9cbf5"/></radialGradient><linearGradient id="fring" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5b8cff"/><stop offset="1" stop-color="#1c3fa8"/></linearGradient><linearGradient id="fglass" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#a9c2ff"/><stop offset="0.45" stop-color="#e4ecff"/><stop offset="1" stop-color="#8eaaf2"/></linearGradient><linearGradient id="fbar" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ffd84a"/><stop offset="0.5" stop-color="#f5b800"/><stop offset="1" stop-color="#c98a00"/></linearGradient><linearGradient id="fglint" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.85"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs><circle cx="16" cy="16.6" r="14.6" fill="#0b1a4a" opacity="0.18"/><circle cx="16" cy="16" r="14.6" fill="url(#fbg)" stroke="url(#fring)" stroke-width="1.8"/><path d="M13.3 7.3v5.6L8.4 21.6A1.9 1.9 0 0 0 10.1 24.5h11.8a1.9 1.9 0 0 0 1.7-2.9L18.7 12.9V7.3" fill="#1c3fa8" opacity="0.25" transform="translate(0.5 0.7)"/><path d="M12.2 7.3h7.6M13.3 7.3v5.6L8.4 21.6A1.9 1.9 0 0 0 10.1 24.5h11.8a1.9 1.9 0 0 0 1.7-2.9L18.7 12.9V7.3" fill="url(#fglass)" stroke="url(#fring)" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"/><rect x="11.6" y="18.6" width="2.2" height="4.2" rx="0.6" fill="url(#fbar)"/><rect x="14.9" y="15.6" width="2.2" height="7.2" rx="0.6" fill="url(#fbar)"/><rect x="18.2" y="19.8" width="2.2" height="3" rx="0.6" fill="url(#fbar)"/><path d="M14.4 9v4.2L11 19.2" fill="none" stroke="url(#fglint)" stroke-width="0.9" stroke-linecap="round"/><ellipse cx="11.5" cy="8.6" rx="5" ry="2.6" fill="#fff" opacity="0.35" transform="rotate(-25 11.5 8.6)"/>`;
 export function Logo({ size = 26 }: { size?: number }) {
-  // Original mark: a blue flask holding a small yellow bar chart, in a circle.
-  return (
-    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
-      <circle cx="16" cy="16" r="15" fill="#eef3ff" stroke="#2b5fd9" strokeWidth="1.6" />
-      <path d="M12.2 7.3h7.6M13.3 7.3v5.6L8.4 21.6A1.9 1.9 0 0 0 10.1 24.5h11.8a1.9 1.9 0 0 0 1.7-2.9L18.7 12.9V7.3" fill="#d6e2ff" stroke="#2b5fd9" strokeWidth="1.7" strokeLinejoin="round" strokeLinecap="round" />
-      <rect x="11.6" y="18.6" width="2.2" height="4.2" rx="0.6" fill="#f2b705" />
-      <rect x="14.9" y="15.6" width="2.2" height="7.2" rx="0.6" fill="#f2b705" />
-      <rect x="18.2" y="19.8" width="2.2" height="3" rx="0.6" fill="#f2b705" />
-    </svg>
-  );
+  return <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true" dangerouslySetInnerHTML={{ __html: LOGO_SVG }} />;
 }
 
 function ThemeToggle() {
