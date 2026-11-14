@@ -335,3 +335,16 @@ def test_stars_follow_the_figure_without_recompute():
     assert u3["stars_analysis_id"] != aid
     an = [a for a in c.get(f"/api/projects/{pid}").json()["analyses"] if a["id"] == aid][0]
     assert an["config"]["value_col"] == "w"
+
+
+def test_paste_larger_than_one_megabyte():
+    c = client("bigpaste@example.org")
+    pid = c.post("/api/projects", json={"name": "Big"}).json()["id"]
+    lines = ["id;group;" + ";".join(f"v{j}" for j in range(30))]
+    lines += [f"S{i};{'AB'[i % 2]};" + ";".join(f"{(i * j) % 97 / 7:.9f}" if j % 11 else "NA" for j in range(30)) for i in range(4000)]
+    text = "\n".join(lines)
+    assert len(text.encode()) > 1024 * 1024
+    r = c.post(f"/api/projects/{pid}/import/preview", data={"text": text})
+    assert r.status_code == 200, r.text[:300]
+    j = r.json()
+    assert len(j["rows"]) == 4000 and len(j["columns"]) == 32 and j["detected"]["delimiter"] == ";"

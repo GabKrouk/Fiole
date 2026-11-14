@@ -50,12 +50,39 @@ export default function DataView({ ctx }: { ctx: ProjectCtx }) {
   const pendingRef = useRef<{ content?: TableContent; name?: string } | null>(null);
   const timer = useRef<number | undefined>();
   const tableRef = useRef<HTMLTableElement>(null);
+  // Large tables: only the rows in view (plus a margin) are drawn, so thousands of rows stay fluid.
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const rowH = useRef(29);
+  const [view, setView] = useState({ top: 0, height: 800 });
+  const scrollRaf = useRef(0);
+  const onGridScroll = () => {
+    cancelAnimationFrame(scrollRaf.current);
+    scrollRaf.current = requestAnimationFrame(() => {
+      const w = wrapRef.current;
+      if (w) setView({ top: w.scrollTop, height: w.clientHeight });
+    });
+  };
+  function scrollToRow(i: number, center = false) {
+    const w = wrapRef.current;
+    if (!w) return;
+    const y = i * rowH.current;
+    if (center) w.scrollTop = Math.max(0, y - w.clientHeight / 2);
+    else if (y < w.scrollTop + 30) w.scrollTop = Math.max(0, y - 30);
+    else if (y + rowH.current > w.scrollTop + w.clientHeight) w.scrollTop = y + rowH.current - w.clientHeight;
+    setView({ top: w.scrollTop, height: w.clientHeight });
+  }
 
   useEffect(() => {
     if (!flashRow || !content) return;
-    const el = tableRef.current?.querySelector(`tr[data-rowid="${CSS.escape(flashRow)}"]`);
-    el?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [flashRow, !!content]);
+    const i = content.rows.findIndex((r) => r.id === flashRow);
+    if (i >= 0) scrollToRow(i, true);
+  }, [flashRow, !!content]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const tr = tableRef.current?.querySelector<HTMLTableRowElement>("tbody tr[data-rowid]");
+    if (tr && tr.offsetHeight) rowH.current = tr.offsetHeight;
+    const w = wrapRef.current;
+    if (w) setView({ top: w.scrollTop, height: w.clientHeight });
+  }, [!!content]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     setDs(null);
@@ -181,9 +208,15 @@ export default function DataView({ ctx }: { ctx: ProjectCtx }) {
   }
 
   function focusCell(r: number, c: number) {
-    const el = tableRef.current?.querySelector<HTMLInputElement>(`input[data-r="${r}"][data-c="${c}"]`);
-    el?.focus();
-    el?.select();
+    if (!content || r < 0 || r >= content.rows.length) return;
+    scrollToRow(r);
+    const go = () => {
+      const el = tableRef.current?.querySelector<HTMLInputElement>(`input[data-r="${r}"][data-c="${c}"]`);
+      el?.focus();
+      el?.select();
+      return !!el;
+    };
+    if (!go()) requestAnimationFrame(() => requestAnimationFrame(go));
   }
 
   function onKey(e: React.KeyboardEvent<HTMLInputElement>, r: number, c: number) {
@@ -208,6 +241,10 @@ export default function DataView({ ctx }: { ctx: ProjectCtx }) {
   }
 
   const design = content.design;
+  const nRows = content.rows.length;
+  const windowed = nRows > 150;
+  const first = windowed ? Math.max(0, Math.floor(view.top / rowH.current) - 30) : 0;
+  const last = windowed ? Math.min(nRows, Math.ceil((view.top + view.height) / rowH.current) + 30) : nRows;
   const numericCols = content.columns.filter((c) => c.type === "numeric");
   const colSelect = (value: string | null | undefined, onChange: (v: string | null) => void, cols = content.columns) => (
     <select value={value || ""} onChange={(e) => onChange(e.target.value || null)} disabled={!canEdit}>
@@ -285,7 +322,7 @@ export default function DataView({ ctx }: { ctx: ProjectCtx }) {
       </details>
 
       <p className="small-text muted">{t("missingHelp")} {canEdit && t("pasteHelp")}</p>
-      <div className="grid-wrap">
+      <div className="grid-wrap" ref={wrapRef} onScroll={onGridScroll}>
         <table className="grid" ref={tableRef}>
           <thead>
             <tr>
@@ -331,7 +368,8 @@ export default function DataView({ ctx }: { ctx: ProjectCtx }) {
             </tr>
           </thead>
           <tbody>
-            {content.rows.map((row, ri) => (
+            {first > 0 && <tr aria-hidden style={{ height: first * rowH.current }}><td colSpan={content.columns.length + 2} /></tr>}
+            {content.rows.slice(first, last).map((row, k) => { const ri = first + k; return (
               <tr key={row.id} data-rowid={row.id} className={`${excluded.has(row.id) ? "excluded" : ""} ${row.id === flashRow ? "row-flash" : ""}`} title={excluded.get(row.id) || ""}>
                 <td className="rowhead">
                   <span className="row tight" style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
@@ -362,7 +400,8 @@ export default function DataView({ ctx }: { ctx: ProjectCtx }) {
                   return c;
                 })}>×</button></td>}
               </tr>
-            ))}
+            ); })}
+            {last < content.rows.length && <tr aria-hidden style={{ height: (content.rows.length - last) * rowH.current }}><td colSpan={content.columns.length + 2} /></tr>}
           </tbody>
         </table>
       </div>
