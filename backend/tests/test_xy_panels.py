@@ -103,3 +103,48 @@ def test_gallery_endpoint():
     assert out and all(x["svg"].startswith("<svg") and x["config"]["font_family"] == "Times New Roman" for x in out)
     ids = [i for x in out for i in re.findall(r'id="([^"]+)"', x["svg"])]
     assert len(ids) == len(set(ids))
+
+
+def test_excel_letterhead_is_skipped():
+    import io
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A2"] = "Atelier de Quantifications isotopiques"
+    ws["A4"] = "Nom de la Manipe :"
+    ws["C4"] = "GAB-1-2026"
+    for j, h in enumerate(["Echantillon", "% C ", "Treat", "time"]):
+        ws.cell(row=8, column=3 + j, value=h)
+    for i, (c, tr, tm) in enumerate([(40.1, "ctrl", 21), (39.2, "ctrl", 21), (33.0, "oryzalin", 23), (34.5, "oryzalin", 23)]):
+        for j, v in enumerate([str(i + 1), c, tr, tm]):
+            ws.cell(row=9 + i, column=3 + j, value=v)
+    buf = io.BytesIO()
+    wb.save(buf)
+    t = importers.parse_excel(buf.getvalue())
+    assert [c["name"] for c in t["columns"]] == ["Echantillon", "% C", "Treat", "time"]
+    assert len(t["rows"]) == 4 and t["detected"]["located"]["first_row"] == 8
+    assert any(w.get("code") == "table_located" for w in t["warnings"])
+    # a sheet that starts with its table is untouched
+    t2 = importers.parse_text("a\tb\n1\t2\n3\t4\n")
+    assert [c["name"] for c in t2["columns"]] == ["a", "b"]
+
+
+def test_bars_by_time_and_treatment():
+    t, col = table()
+    cfg = {"type": "bar", "group_col": col["time"], "value_col": col["Excès 15N (atom%)"], "color_by": col["Treat"], "error": "sem",
+           "x_merge": True, "x_stars": True, "annotations": [{"type": "pvalue", "all": True}]}
+    r = render_figure(t, cfg, {}, "fr")
+    svg = r["svg"]
+    labels = re.findall(r'data-el="group-label" data-group="([^"]+)"', svg)
+    assert labels == ["22", "60", "180", "330", "1540"]  # numeric order, close times pooled
+    assert 'data-el="legend"' in svg and svg.count('data-el="group" data-group=') == 2
+    assert ">**<" in svg and "test t de Welch (ctrl contre oryzalin)" in r["caption"]
+    # three treatments: each compared with the first
+    rows = [dict(r, id=r["id"] + "x", cells={**r["cells"], col["Treat"]: "drugX"}) for r in t["rows"] if r["cells"][col["Treat"]] == "ctrl"]
+    t3 = {**t, "rows": t["rows"] + rows}
+    svg3 = render_figure(t3, {**cfg, "type": "box"}, {}, "en")["svg"]
+    assert svg3.count('data-el="group" data-group=') == 3
+    s = {x["id"]: x["config"] for x in suggestions(t)}
+    assert s["clustered"]["group_col"] == col["time"] and s["clustered"]["color_by"] == col["Treat"]

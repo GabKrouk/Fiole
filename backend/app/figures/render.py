@@ -426,7 +426,11 @@ def render_figure(content: dict, cfg_in: dict, results: dict[str, dict] | None =
     warnings: list[dict] = []
     t = cfg["type"]
 
-    if t in ("scatter_groups", "bar", "box", "violin"):
+    if t in ("scatter_groups", "bar", "box", "violin") and cfg.get("color_by") and cfg.get("group_col") and cfg.get("value_col") \
+            and cfg["color_by"] != cfg["group_col"] and col_by_id(content, cfg["color_by"]):
+        cap = _render_clustered(svg, cfg, content, warnings, lang)
+        results = {}  # pairwise stars across X groups make no sense here: stars come from x_stars
+    elif t in ("scatter_groups", "bar", "box", "violin"):
         groups = extract_groups(content, design_for(content, cfg))
         if cfg.get("average_technical"):
             groups = {k: average_technical(g) for k, g in groups.items()}
@@ -1193,6 +1197,201 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
             svg.text(lx + 6, ly + fs * 0.85, cfg["group_labels"].get(name, name), anchor="start")
             ly += fs * 1.4
         svg.close()
+    cap = caption(cfg, counts, lang)
+    if xmap and any(k != v for k, v in xmap.items()):
+        pooled = [cl for cl in close_x_clusters(raw_x) if len(cl) > 1]
+        txt = "; ".join(f"{' / '.join(fmt_tick(v) for v in cl)} → {fmt_tick(xmap[cl[0]])}" for cl in pooled)
+        cap += (f" Valeurs de X proches regroupées : {txt}." if lang == "fr" else f" Close X values pooled: {txt}.")
+    return cap + star_txt
+
+
+def _sort_levels(levels: list[str]) -> list[str]:
+    """Numbers in numeric order (time points 20, 60, 180…), text in order of appearance."""
+    def num(s):
+        try:
+            return float(s)
+        except (TypeError, ValueError):
+            return None
+    if levels and all(num(v) is not None for v in levels):
+        return sorted(levels, key=num)
+    return levels
+
+
+def _render_clustered(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) -> str:
+    """Groups side by side inside each X category, one colour per sub-group: e.g. time on X and
+    one bar (or box, or dots) per treatment at each time. Stars compare the sub-groups within each X."""
+    gcol, vcol, scol = cfg.get("group_col"), cfg.get("value_col"), cfg.get("color_by")
+    if not col_by_id(content, gcol) or not col_by_id(content, vcol) or not col_by_id(content, scol):
+        raise _err("Choose the X groups, the values and the colour column.", "Choisissez les groupes en X, les valeurs et la colonne de couleur.")
+    excl = excluded_row_ids(content)
+    gnum = all(isinstance(r["cells"].get(gcol), (int, float)) for r in content["rows"] if r["cells"].get(gcol) is not None)
+    xmap: dict[float, float] = {}
+    raw_x = [float(r["cells"][gcol]) for r in content["rows"] if r["id"] not in excl and isinstance(r["cells"].get(gcol), (int, float))]
+    if gnum and cfg.get("x_merge"):
+        xmap = x_merge_map(raw_x)
+    elif gnum:
+        close = [cl for cl in close_x_clusters(raw_x) if len(cl) > 1]
+        if close and len(set(raw_x)) <= 40:
+            ex = ", ".join(" / ".join(fmt_tick(v) for v in cl) for cl in close[:3])
+            warnings.append({
+                "en": f"Some X values are very close ({ex}) and form separate groups. Pool them into one X value each?",
+                "fr": f"Certaines valeurs de X sont très proches ({ex}) et forment des groupes séparés. Les regrouper en une seule valeur de X ?",
+                "action": {"patch": {"x_merge": True}, "en": "Pool close X values", "fr": "Regrouper les X proches"},
+            })
+    cells: dict[tuple[str, str], list[tuple[float, str]]] = {}
+    xs_seen: list[str] = []
+    ss_seen: list[str] = []
+    for r in content["rows"]:
+        if r["id"] in excl:
+            continue
+        gx, s, v = r["cells"].get(gcol), _label(r["cells"].get(scol)), r["cells"].get(vcol)
+        if gx is None or s is None or not isinstance(v, (int, float)):
+            continue
+        if cfg["y_scale"] == "log10" and v <= 0:
+            continue
+        x = fmt_tick(xmap.get(float(gx), float(gx))) if gnum else _label(gx)
+        if x not in xs_seen:
+            xs_seen.append(x)
+        if s not in ss_seen:
+            ss_seen.append(s)
+        cells.setdefault((x, s), []).append((float(v), r["id"]))
+    if not cells:
+        raise _err("No values to plot.", "Aucune valeur à tracer.")
+    xs_order = _sort_levels(xs_seen) if gnum else xs_seen
+    go = [g for g in (cfg.get("group_order") or []) if g in ss_seen]
+    subs = go + [s for s in ss_seen if s not in go]
+    t = cfg["type"]
+    allv = [v for vs in cells.values() for v, _ in vs]
+    lo, hi = min(allv), max(allv)
+    summ: dict[tuple[str, str], tuple] = {}
+    for k, vs in cells.items():
+        c, el, eh = _center_error([v for v, _ in vs], cfg["center"], cfg["error"])
+        summ[k] = (c, el, eh)
+        if t in ("bar", "scatter_groups"):
+            for q in (c, el, eh):
+                if q is not None:
+                    lo, hi = min(lo, q), max(hi, q)
+    # stars within each X: the first sub-group (reference) against each other one
+    star_rows: list[tuple[str, int, str]] = []
+    star_txt = ""
+    if cfg.get("x_stars") and len(subs) >= 2:
+        from ..stats.core import format_p
+
+        test = cfg.get("x_stars_test") or "welch"
+        style = figure_p_format(cfg)
+        for x in xs_order:
+            ref = [v for v, _ in cells.get((x, subs[0]), [])]
+            for j, s in enumerate(subs[1:]):
+                p = _pair_p(ref, [v for v, _ in cells.get((x, s), [])], test)
+                if p is None:
+                    continue
+                lab = p_label(p, format_p(p), style, cfg.get("star_thresholds"))
+                if lab == "ns" and cfg.get("hide_ns"):
+                    continue
+                star_rows.append((x, j + 1, lab))
+        names = [rt.plain(cfg["group_labels"].get(n, n)) for n in subs]
+        tn = PAIR_TESTS.get(test, PAIR_TESTS["welch"])
+        if lang == "fr":
+            star_txt = f" Significativité dans chaque groupe de X : {tn[1]} ({names[0]} contre {names[1] if len(names) == 2 else 'chacun des autres'}), sans correction pour comparaisons multiples."
+        else:
+            star_txt = f" Significance within each X group: {tn[0]} ({names[0]} vs {names[1] if len(names) == 2 else 'each other group'}), no multiple-comparison correction."
+        if style == "stars":
+            ths = sorted([float(v) for v in (cfg.get("star_thresholds") or DEFAULT_STARS)], reverse=True)
+            parts = ", ".join(f"{'*' * (i + 1)} p < {v:g}" for i, v in enumerate(ths)) + ("" if cfg.get("hide_ns") else f", ns p ≥ {ths[0]:g}")
+            star_txt += f" {parts.replace('.', ',') if lang == 'fr' else parts}."
+    fs, lw = cfg["font_size_pt"], cfg["line_width_pt"]
+    n_levels = (len(subs) - 1) if star_rows else 0
+    if star_rows and cfg["y_max"] is None and cfg["y_scale"] != "log10":
+        hi = hi + (hi - min(lo, 0 if t == "bar" else lo)) * 0.12 * n_levels
+    ylo, yhi, yticks, log = _y_axis(cfg, lo, hi, include_zero=(t == "bar"), warnings=warnings)
+    xlabels = [cfg["group_labels"].get(x, x) for x in xs_order]
+    legend_h = fs * 1.5 if len(subs) > 1 and cfg["legend"] is not False else 0.0
+    left, right, top, bottom, ys, rotate = _frame(svg, cfg, len(xs_order), xlabels, ylo, yhi, yticks, log, extra_top=legend_h)
+    band = (right - left) / len(xs_order)
+    inner = band * 0.84 / len(subs)
+    half = inner * 0.38
+    fo = float(cfg.get("fill_opacity", 0.3))
+    svg.add(f'<clipPath id="plotclip"><rect x="{left:.2f}" y="{top - 1:.2f}" width="{right - left:.2f}" height="{bottom - top + 1:.2f}"/></clipPath>')
+    svg.add('<g clip-path="url(#plotclip)">')
+    pos: dict[tuple[str, str], float] = {}
+    top_at: dict[tuple[str, str], float] = {}
+    for j, s in enumerate(subs):
+        color = color_for(cfg, s, j)
+        svg.open("group", group=s, index=j)
+        for i, x in enumerate(xs_order):
+            vs = cells.get((x, s))
+            cx = left + band * i + band * 0.08 + inner * (j + 0.5)
+            pos[(x, s)] = cx
+            if not vs:
+                continue
+            vals = [v for v, _ in vs]
+            rids = [r for _, r in vs]
+            c, el, eh = summ[(x, s)]
+            if t == "bar" and c is not None:
+                base = ys(max(ylo, 0) if not log else ylo)
+                svg.add(f'<rect x="{cx - half:.2f}" y="{min(ys(c), base):.2f}" width="{2 * half:.2f}" height="{abs(base - ys(c)):.2f}" fill="{color}" fill-opacity="{fo:.2f}" stroke="{color}" stroke-width="{lw:.2f}"/>')
+                _errbar(svg, cx, ys, el, eh, half * 0.45, lw, "#000")
+            elif t in ("box", "violin"):
+                a = np.asarray(vals)
+                q1, med, q3 = np.quantile(a, [0.25, 0.5, 0.75])
+                iqr = q3 - q1
+                lo_w, hi_w = a[a >= q1 - 1.5 * iqr].min(), a[a <= q3 + 1.5 * iqr].max()
+                svg.add(f'<rect x="{cx - half:.2f}" y="{ys(q3):.2f}" width="{2 * half:.2f}" height="{abs(ys(q1) - ys(q3)):.2f}" fill="{color}" fill-opacity="{fo:.2f}" stroke="{color}" stroke-width="{lw:.2f}"/>')
+                svg.line(cx - half, ys(med), cx + half, ys(med), color=color, width=lw * 1.8)
+                svg.line(cx, ys(q3), cx, ys(hi_w), color=color)
+                svg.line(cx, ys(q1), cx, ys(lo_w), color=color)
+            if cfg["show_points"] or t == "scatter_groups":
+                _points(svg, cfg, vals, cx, inner * 2.2, ys, color, rids)
+            if t == "scatter_groups" and c is not None:
+                svg.line(cx - half * 0.9, ys(c), cx + half * 0.9, ys(c), color="#000", width=lw * 1.6)
+                _errbar(svg, cx, ys, el, eh, half * 0.45, lw, "#000")
+            tops = [ys(v) for v in vals] if (cfg["show_points"] or t == "scatter_groups") else []
+            tops += [ys(q) for q in (c, eh) if q is not None]
+            if t in ("box", "violin"):
+                tops.append(ys(max(vals)))
+            top_at[(x, s)] = min(tops) if tops else bottom
+        svg.close()
+    svg.add("</g>")
+    out, inn = tick_span(cfg)
+    svg.open("x-axis")
+    for i, x in enumerate(xs_order):
+        cx = left + band * (i + 0.5)
+        if out or inn:
+            svg.line(cx, bottom - inn, cx, bottom + out, width=lw)
+    svg.close()
+    for i, x in enumerate(xs_order):
+        cx = left + band * (i + 0.5)
+        svg.open("group-label", group=x)
+        if rotate:
+            svg.text(cx + fs * 0.3, bottom + out + 2, xlabels[i], anchor="end", rotate=-45, baseline="hanging")
+        else:
+            svg.text(cx, bottom + out + 1.5 + fs, xlabels[i])
+        svg.close()
+    if star_rows:
+        svg.open("x-stars")
+        for x, j, lab in star_rows:
+            a, b = pos[(x, subs[0])], pos[(x, subs[j])]
+            yb = min(top_at.get((x, subs[k]), bottom) for k in range(0, j + 1)) - 4 - (j - 1) * fs * 1.3
+            yb = max(yb, top - legend_h + fs * 1.2)
+            svg.add(f'<path d="M{a:.2f},{yb + 2.5:.2f} L{a:.2f},{yb:.2f} L{b:.2f},{yb:.2f} L{b:.2f},{yb + 2.5:.2f}" fill="none" stroke="#000" stroke-width="{lw:.2f}"/>')
+            svg.text((a + b) / 2, yb - (1.2 if lab.startswith("*") else 2.0), lab, size=fs * (1 if lab.startswith("*") or lab == "ns" else 0.85))
+        svg.close()
+    if len(subs) > 1 and cfg["legend"] is not False:
+        # one row above the plot, centred: never on the data
+        items = [(s, rt.plain(cfg["group_labels"].get(s, s))) for s in subs]
+        total = sum(text_width(n, fs) + 16 for _, n in items)
+        lx = (left + right) / 2 - total / 2 + float(cfg.get("legend_dx") or 0)
+        ly = top - legend_h + fs * 0.2 + float(cfg.get("legend_dy") or 0)
+        svg.open("legend", drag="legend")
+        for j, (s, n) in enumerate(items):
+            svg.marker(lx + 3, ly + fs * 0.5, color_for(cfg, s, j))
+            svg.text(lx + 9, ly + fs * 0.85, cfg["group_labels"].get(s, s), anchor="start")
+            lx += text_width(n, fs) + 16
+        svg.close()
+    counts = []
+    for s in subs:
+        n = sum(len(cells.get((x, s), [])) for x in xs_order)
+        counts.append((rt.plain(cfg["group_labels"].get(s, s)), n))
     cap = caption(cfg, counts, lang)
     if xmap and any(k != v for k, v in xmap.items()):
         pooled = [cl for cl in close_x_clusters(raw_x) if len(cl) > 1]

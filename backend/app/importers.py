@@ -183,6 +183,51 @@ def build_table(raw: list[list[Any]], header: bool, decimal: str) -> dict:
     }
 
 
+def _filled(v: Any) -> bool:
+    return v is not None and not (isinstance(v, str) and not v.strip())
+
+
+def _is_num(v: Any) -> bool:
+    return isinstance(v, float) or (isinstance(v, str) and parse_number(v, ".") is not None or isinstance(v, str) and parse_number(v, ",") is not None)
+
+
+def locate_table(raw: list[list[Any]]) -> tuple[list[list[Any]], dict | None]:
+    """Instrument and platform exports often put a letterhead (lab name, address, operator, date…)
+    above the real table, and leave empty columns on the left. Find the table: the longest run of
+    rows holding numbers, plus the row of names just above it. Returns the cropped rows and what
+    was skipped (None when the sheet already starts with its table)."""
+    if not raw:
+        return raw, None
+    width = max(len(r) for r in raw)
+    rows = [list(r) + [None] * (width - len(r)) for r in raw]
+    is_data = [sum(_filled(v) for v in r) >= 2 and any(_is_num(v) for v in r) for r in rows]
+    best, cur, best_start, start = 0, 0, 0, 0
+    for i, d in enumerate(is_data):
+        if d:
+            if cur == 0:
+                start = i
+            cur += 1
+            if cur > best:
+                best, best_start = cur, start
+        else:
+            cur = 0
+    if best < 2:
+        return raw, None
+    top = best_start
+    if top > 0:
+        h = rows[top - 1]
+        if sum(_filled(v) for v in h) >= 2 and all(not _filled(v) or (isinstance(v, str) and not _is_num(v)) for v in h):
+            top -= 1
+    end = best_start + best
+    block = rows[top:end]
+    keep = [j for j in range(width) if any(_filled(r[j]) for r in block)]
+    if top == 0 and end == len(rows) and keep == list(range(width)):
+        return raw, None
+    lo, hi = (keep[0], keep[-1]) if keep else (0, width - 1)
+    cropped = [r[lo:hi + 1] for r in block]
+    return cropped, {"first_row": top + 1, "last_row": end, "first_col": lo + 1, "skipped_above": top, "skipped_below": len(rows) - end}
+
+
 def _fmt_num(v: float) -> str:
     return str(int(v)) if v.is_integer() else repr(v)
 
@@ -219,11 +264,18 @@ def parse_excel(data: bytes, sheet: str | None = None, header: bool | None = Non
     wb.close()
     while raw and all(v is None or (isinstance(v, str) and not v.strip()) for v in raw[-1]):
         raw.pop()
+    raw, located = locate_table(raw)
     str_cells = [v for r in raw[1:200] for v in r if isinstance(v, str)]
     dec = decimal or detect_decimal(str_cells, ";")
     if header is None:
         first = raw[0] if raw else []
         header = not (first and all(isinstance(v, float) or v is None for v in first))
     table = build_table(raw, header, dec)
-    table["detected"] = {"delimiter": None, "decimal": dec, "header": header, "sheet": ws.title, "sheets": sheets}
+    table["detected"] = {"delimiter": None, "decimal": dec, "header": header, "sheet": ws.title, "sheets": sheets, "located": located}
+    if located and located["skipped_above"]:
+        table.setdefault("warnings", []).append({
+            "code": "table_located",
+            "en": f"The table starts at row {located['first_row']} of the sheet: the {located['skipped_above']} rows above it (letterhead, comments) were left out.",
+            "fr": f"Le tableau commence à la ligne {located['first_row']} de la feuille : les {located['skipped_above']} lignes au-dessus (en-tête, commentaires) ont été ignorées.",
+        })
     return table

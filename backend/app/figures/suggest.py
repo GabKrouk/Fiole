@@ -145,6 +145,16 @@ def suggestions(content: dict) -> list[dict]:
                     "Several variables on one Y axis (best for variables with the same unit).",
                     {**_sem_line(x, sel, None, 0, xv), "width_mm": 85, "height_mm": 70})
 
+    if xcol and color and meas:
+        pool = [c for c in meas if c["id"] != xcol["id"]] or meas
+        v = max(pool, key=lambda c: _signal(content, c["id"], [xcol["id"], color["id"]]))
+        cfg = {"type": "bar", "group_col": xcol["id"], "value_col": v["id"], "color_by": color["id"], "error": "sem", "show_points": True,
+               "x_stars": True, "width_mm": 120, "height_mm": 70}
+        if any(len(cl) > 1 for cl in close_x_clusters(values[xcol["id"]])):
+            cfg["x_merge"] = True
+        add("clustered", f"Barres par {xcol['name']} et par {color['name']}", f"Bars by {xcol['name']} and {color['name']}",
+            f"Une barre par {color['name']} à chaque {xcol['name']}, moyenne ± SEM, étoiles dans chaque groupe.",
+            f"One bar per {color['name']} at each {xcol['name']}, mean ± SEM, stars within each group.", cfg)
     if color and meas:
         pool = [c for c in meas if not xcol or c["id"] != xcol["id"]] or meas
         v = max(pool, key=lambda c: _signal(content, c["id"], [color["id"]]))
