@@ -9,6 +9,7 @@ export interface Selection {
   row?: string; // clicked data point
   value?: string;
   x?: string;
+  ycol?: string; // panel of a multi-panel figure (its Y column)
 }
 
 interface Props {
@@ -38,6 +39,8 @@ function readSel(target: Element | null): Selection | null {
   const s: Selection = { el: g.dataset.el! };
   if (g.dataset.group !== undefined) s.group = g.dataset.group;
   if (g.dataset.index !== undefined) s.index = Number(g.dataset.index);
+  const panel = target?.closest("[data-ycol]") as HTMLElement | null;
+  if (panel?.dataset.ycol) s.ycol = panel.dataset.ycol;
   const pt = target?.closest("[data-row]") as HTMLElement | null;
   if (pt && pt.dataset.row) {
     s.row = pt.dataset.row;

@@ -183,7 +183,7 @@ export default function ProjectPage() {
       dataset_id: ds.id, name: `Figure ${project!.figures.length + 1}`, config: { type: "scatter_groups", width_mm: 80, height_mm: 70, ...smart },
     });
     await reload();
-    nav(`${base}/figure/${f.id}`);
+    nav(`${base}/figure/${f.id}?gallery=1`);
   }
 
   async function newLayout() {

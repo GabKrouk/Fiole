@@ -480,3 +480,22 @@ button.wrap-btn { white-space: normal; text-align: left; line-height: 1.35; bord
 .tabs .tab-trash { margin-left: auto; }
 .project-card .card-delete { margin-top: 10px; color: var(--ink-3); background: transparent !important; border: 1px solid var(--line) !important; }
 .project-card .card-delete:hover { color: var(--danger); border-color: var(--danger) !important; background: var(--danger-soft) !important; }
+
+/* Y variables as toggle chips: click to add or remove, no mode to switch.
+   !important: the generic button background rule above is very specific. */
+.y-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+button.y-chip { border: 1px solid var(--line); background: var(--surface-2) !important; color: var(--ink-2); border-radius: 999px; padding: 3px 10px; font-size: 12.5px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+button.y-chip:hover:not(:disabled) { border-color: var(--accent) !important; color: var(--ink); }
+button.y-chip.on, button.y-chip.on:hover:not(:disabled) { background: var(--accent) !important; border-color: var(--accent) !important; color: var(--accent-ink); font-weight: 600; }
+.y-chip.on b { background: rgba(255, 255, 255, 0.28); border-radius: 999px; min-width: 16px; height: 16px; font-size: 10.5px; display: inline-grid; place-items: center; }
+
+/* Figure gallery: thumbnails rendered with the user's data */
+.modal.wide { max-width: 1180px; }
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+button.gallery-card { white-space: normal; min-width: 0; display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2) !important; cursor: pointer; color: var(--ink); font: inherit; }
+.gallery-card.wide { grid-column: span 2; }
+button.gallery-card:hover:not(:disabled) { border-color: var(--accent) !important; box-shadow: 0 0 0 2px var(--accent); }
+.gallery-card.skeleton { height: 220px; opacity: 0.5; }
+.gallery-thumb { background: #fff; border-radius: 6px; padding: 4px; display: grid; place-items: center; margin-bottom: 4px; }
+.gallery-thumb svg { width: 100%; height: auto; max-height: 260px; }
+@media (max-width: 560px) { .gallery-card.wide { grid-column: auto; } }

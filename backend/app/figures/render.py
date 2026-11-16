@@ -389,11 +389,23 @@ def p_label(p: float, p_display: str, style: str, thresholds=None) -> str:
     return f"p = {p_display}"
 
 
+def xy_columns(content: dict, cfg: dict) -> list[str]:
+    """Y columns of an XY figure: the X column is never a Y series (plotting X against itself is
+    meaningless); keep the order, no duplicates, only columns that exist."""
+    ys = cfg.get("y") or []
+    ys = [ys] if isinstance(ys, str) else ys
+    return [y for i, y in enumerate(ys) if y != cfg.get("x") and y not in ys[:i] and col_by_id(content, y)]
+
+
 def render_figure(content: dict, cfg_in: dict, results: dict[str, dict] | None = None, lang: str = "en") -> dict:
     """Return {"svg", "caption", "warnings"}.
 
     `results` maps analysis_id → {"result": ..., "stale": bool} for p-value annotations.
     """
+    if (cfg_in or {}).get("type") in ("xy", "line") and (cfg_in or {}).get("y_layout") == "panels":
+        ys = xy_columns(content, cfg_in)
+        if len(ys) > 1:
+            return _render_panels(content, cfg_in, ys, results, lang)
     cfg = merged_config(cfg_in)
     results = results or {}
     if cfg["type"] in ("scatter_groups", "bar", "box", "violin"):
@@ -402,10 +414,7 @@ def render_figure(content: dict, cfg_in: dict, results: dict[str, dict] | None =
         if not cfg["x_label"] and cfg.get("group_col") and col_by_id(content, cfg["group_col"]):
             cfg["x_label"] = col_by_id(content, cfg["group_col"])["name"]
     else:
-        ys = cfg.get("y") or []
-        ys = [ys] if isinstance(ys, str) else ys
-        # the X column is never a Y series (plotting X against itself is meaningless); keep the order, no duplicates
-        ys = [y for i, y in enumerate(ys) if y != cfg.get("x") and y not in ys[:i] and col_by_id(content, y)]
+        ys = xy_columns(content, cfg)
         cfg["y"] = ys
         if not cfg["x_label"] and col_by_id(content, cfg.get("x")):
             cfg["x_label"] = col_by_id(content, cfg["x"])["name"]
@@ -520,8 +529,13 @@ def _frame(svg: SVG, cfg: dict, n_cats: int | None, xlabels: list[str] | None, y
         svg.text(left - out - 1.5, ys(v) + fs * 0.35, fmt_tick(v), anchor="end")
     svg.close()
     if ylab:
+        # a long axis title on a short panel: shrink it (down to 75 %) rather than run past the plot
+        lsize = fs
+        avail = bottom - top + fs
+        if text_width(ylab, fs) > avail:
+            lsize = max(fs * 0.75, fs * avail / text_width(ylab, fs))
         svg.open("y-label")
-        svg.text(3 + fs * 0.85, (top + bottom) / 2, ylab, rotate=-90)
+        svg.text(3 + fs * 0.85, (top + bottom) / 2, ylab, size=lsize, rotate=-90)
         svg.close()
     # x axis line (ticks are drawn by the caller)
     svg.open("x-axis")
@@ -557,6 +571,12 @@ def _y_axis(cfg: dict, lo: float, hi: float, include_zero: bool, warnings: list)
         if lo <= 0:
             warnings.append({"en": "Log scale: values ≤ 0 cannot be shown and were left out of the plot.", "fr": "Échelle log : les valeurs ≤ 0 ne peuvent pas être affichées et ont été omises du graphique."})
         pos_lo = lo if lo > 0 else None
+        if cfg["type"] == "line" and pos_lo and hi / pos_lo < 50 and not cfg["y_min"] and not cfg["y_max"]:
+            # a short span on a log axis: hug the data and tick at 1, 2, 5 × 10^k instead of whole decades
+            ylo, yhi = pos_lo / 1.25, hi * 1.25
+            ticks = [m * 10.0**k for k in range(math.floor(math.log10(ylo)), math.ceil(math.log10(yhi)) + 1) for m in (1, 2, 5) if ylo <= m * 10.0**k <= yhi]
+            if len(ticks) >= 2:
+                return ylo, yhi, ticks, True
         ylo = cfg["y_min"] if cfg["y_min"] and cfg["y_min"] > 0 else (10 ** math.floor(math.log10(pos_lo)) if pos_lo else 0.1)
         yhi = cfg["y_max"] if cfg["y_max"] and cfg["y_max"] > 0 else 10 ** math.ceil(math.log10(max(hi, ylo * 10)))
         return ylo, yhi, log_ticks(ylo, yhi), True
@@ -874,6 +894,61 @@ def _points(svg: SVG, cfg: dict, vals: list[float], cx: float, band: float, ys, 
         svg.marker(cx + off, ys(vals[idx]), color, extra=f' data-row="{attr(rid)}" data-v="{vals[idx]:.6g}"')
 
 
+def _sig2(v: float) -> float:
+    """Round to 2 significant digits (59.67 → 60, 333 → 330)."""
+    if v == 0:
+        return 0.0
+    d = 1 - int(math.floor(math.log10(abs(v))))
+    return round(v, d)
+
+
+def close_x_clusters(xs: list[float], tol: float = 0.1) -> list[list[float]]:
+    """Distinct X values that are within `tol` (relative) of each other, e.g. sampling times 21 and 23 min
+    for a nominal 20 min. Each cluster is a sorted list of distinct values."""
+    vals = sorted(set(xs))
+    out: list[list[float]] = []
+    for v in vals:
+        if out and abs(v - out[-1][0]) <= tol * max(abs(v), abs(out[-1][0])) and abs(v - out[-1][0]) > 0:
+            out[-1].append(v)
+        else:
+            out.append([v])
+    return out
+
+
+def x_merge_map(xs: list[float], tol: float = 0.1) -> dict[float, float]:
+    """X value → value of its cluster (the cluster mean rounded to 2 significant digits)."""
+    m = {}
+    for cl in close_x_clusters(xs, tol):
+        lab = cl[0] if len(cl) == 1 else _sig2(sum(cl) / len(cl))
+        for v in cl:
+            m[v] = lab
+    return m
+
+
+PAIR_TESTS = {
+    "welch": ("Welch’s t-test", "test t de Welch"),
+    "student": ("Student’s t-test", "test t de Student"),
+    "mannwhitney": ("Mann–Whitney test", "test de Mann–Whitney"),
+}
+
+
+def _pair_p(a: list[float], b: list[float], test: str) -> float | None:
+    from scipy import stats as sps
+
+    if len(a) < 2 or len(b) < 2:
+        return None
+    try:
+        if test == "mannwhitney":
+            p = sps.mannwhitneyu(a, b, alternative="two-sided").pvalue
+        else:
+            if np.var(a) == 0 and np.var(b) == 0:
+                return None
+            p = sps.ttest_ind(a, b, equal_var=(test == "student")).pvalue
+    except ValueError:
+        return None
+    return float(p) if p == p else None
+
+
 def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) -> str:
     xc = cfg.get("x")
     ycols = cfg.get("y") or []
@@ -885,6 +960,23 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
     series = []
     rows_of: dict[str, list[str]] = {}
     color_by = cfg.get("color_by") if col_by_id(content, cfg.get("color_by")) else None
+    t = cfg["type"]
+    # X values close to each other (21 and 23 min for a nominal 20 min) can be pooled into one time point
+    raw_x = [float(r["cells"].get(xc)) for r in content["rows"] if r["id"] not in excl and isinstance(r["cells"].get(xc), (int, float))]
+    xmap: dict[float, float] = {}
+    if t == "line":
+        if cfg.get("x_merge"):
+            xmap = x_merge_map(raw_x)
+        else:
+            close = [cl for cl in close_x_clusters(raw_x) if len(cl) > 1]
+            n_distinct = len(set(raw_x))
+            if close and n_distinct <= 40:
+                ex = ", ".join(" / ".join(fmt_tick(v) for v in cl) for cl in close[:3])
+                warnings.append({
+                    "en": f"Some X values are very close ({ex}): the points are not averaged together. Pool them into one X value each?",
+                    "fr": f"Certaines valeurs de X sont très proches ({ex}) : leurs points ne sont pas moyennés ensemble. Les regrouper en une seule valeur de X ?",
+                    "action": {"patch": {"x_merge": True}, "en": "Pool close X values", "fr": "Regrouper les X proches"},
+                })
     for yc in ycols:
         col = col_by_id(content, yc)
         if col is None:
@@ -895,6 +987,7 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
                 continue
             x, y = row["cells"].get(xc), row["cells"].get(yc)
             if isinstance(x, (int, float)) and isinstance(y, (int, float)) and x is not None and y is not None:
+                x = xmap.get(float(x), float(x))
                 if (cfg["x_scale"] == "log10" and x <= 0) or (cfg["y_scale"] == "log10" and y <= 0):
                     continue
                 if color_by:
@@ -914,7 +1007,6 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
     ally = [p[1] for _, s in series for p in s]
     if not allx:
         raise _err("No complete (X, Y) pairs to plot.", "Aucune paire (X, Y) complète à tracer.")
-    t = cfg["type"]
     summaries = []
     if t == "line":
         for name, pts in series:
@@ -928,12 +1020,64 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
             summaries.append((name, summ))
             for _, c, el, eh, _n in summ:
                 ally += [v for v in (c, el, eh) if v is not None]
+        if not cfg["show_points"]:
+            ally = [v for _, summ in summaries for (_x, c, el, eh, _n) in summ for v in (c, el, eh) if v is not None]
+    # Significance at each X value: the first series (e.g. the control) against each of the others
+    star_rows: list[tuple[float, int, str]] = []  # (x, rank above the data, label)
+    star_txt = ""
+    if t == "line" and cfg.get("x_stars") and len(series) >= 2:
+        test = cfg.get("x_stars_test") or "welch"
+        style = figure_p_format(cfg)
+        th = cfg.get("star_thresholds")
+        ref_name, ref_pts = series[0]
+        ref_by: dict[float, list[float]] = {}
+        for x, y in ref_pts:
+            ref_by.setdefault(x, []).append(y)
+        n_cmp = 0
+        for k, (name, pts) in enumerate(series[1:]):
+            by: dict[float, list[float]] = {}
+            for x, y in pts:
+                by.setdefault(x, []).append(y)
+            done = False
+            for x in sorted(set(by) & set(ref_by)):
+                p = _pair_p(ref_by[x], by[x], test)
+                if p is None:
+                    continue
+                from ..stats.core import format_p
+
+                lab = p_label(p, format_p(p), style, th)
+                if lab == "ns" and cfg.get("hide_ns"):
+                    continue
+                star_rows.append((x, k, lab))
+                done = True
+            n_cmp += done
+        if not star_rows and not cfg.get("hide_ns"):
+            warnings.append({"en": "Stars need at least 2 values per group at the same X.", "fr": "Les étoiles demandent au moins 2 valeurs par groupe à un même X."})
+        names = [rt.plain(cfg["group_labels"].get(n, n)) for n, _ in series]
+        tn = PAIR_TESTS.get(test, PAIR_TESTS["welch"])
+        if lang == "fr":
+            vs = f"{names[0]} contre " + (names[1] if len(names) == 2 else "chacun des autres groupes")
+            star_txt = f" Significativité à chaque valeur de X : {tn[1]} ({vs}), sans correction pour comparaisons multiples."
+        else:
+            vs = f"{names[0]} vs " + (names[1] if len(names) == 2 else "each other group")
+            star_txt = f" Significance at each X value: {tn[0]} ({vs}), no multiple-comparison correction."
+        if style == "stars":
+            ths = sorted([float(v) for v in (th or DEFAULT_STARS)], reverse=True)
+            parts = ", ".join(f"{'*' * (i + 1)} p < {v:g}" for i, v in enumerate(ths)) + ("" if cfg.get("hide_ns") else f", ns p ≥ {ths[0]:g}")
+            star_txt += f" {parts.replace('.', ',') if lang == 'fr' else parts}."
+    n_star_rows = (max(k for _, k, _ in star_rows) + 1) if star_rows else 0
     ylo, yhi, yticks, ylog = _y_axis(cfg, min(ally), max(ally), include_zero=False, warnings=warnings)
     xlog = cfg["x_scale"] == "log10"
+    distinct_x = sorted(set(allx))
     if xlog:
         xlo = cfg["x_min"] if cfg["x_min"] and cfg["x_min"] > 0 else 10 ** math.floor(math.log10(min(allx)))
         xhi = cfg["x_max"] if cfg["x_max"] and cfg["x_max"] > 0 else 10 ** math.ceil(math.log10(max(allx)))
-        xticks = log_ticks(xlo, xhi)
+        if cfg.get("x_ticks", "auto") != "regular" and t == "line" and len(distinct_x) <= 12 and not (cfg["x_min"] or cfg["x_max"]):
+            # time courses on a log axis: tick the sampled times themselves, with a little room around them
+            xlo, xhi = min(distinct_x) / 1.35, max(distinct_x) * 1.35
+            xticks = distinct_x
+        else:
+            xticks = log_ticks(xlo, xhi)
     else:
         xlo, xhi, xticks = nice_range(min(allx), max(allx), False)
         if cfg["x_min"] is not None:
@@ -942,28 +1086,39 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
             xhi = float(cfg["x_max"])
         if cfg["x_min"] is not None or cfg["x_max"] is not None:
             xticks = ticks_in(xlo, xhi)
-    left, right, top, bottom, ys, _ = _frame(svg, cfg, None, None, ylo, yhi, yticks, ylog)
-    xs = Scale(xlo, xhi, left + 4, right - 4, xlog)
+        if cfg.get("x_ticks") == "data" and len(distinct_x) <= 20:
+            xticks = [v for v in distinct_x if xlo <= v <= xhi]
     fs, lw = cfg["font_size_pt"], cfg["line_width_pt"]
-    if not xlog:
+    left, right, top, bottom, ys, _ = _frame(svg, cfg, None, None, ylo, yhi, yticks, ylog, extra_top=n_star_rows * fs * 1.05)
+    xs = Scale(xlo, xhi, left + 4, right - 4, xlog)
+    if not xlog and cfg.get("x_ticks") != "data":
         xticks = stepped_ticks(xlo, xhi, cfg.get("x_tick_step")) or xticks
     out, _inn = tick_span(cfg)
     svg.open("x-axis")
     draw_x_ticks(svg, cfg, bottom, xs, xticks, xlo, xhi, xlog)
+    # data-value ticks can be crowded (20, 60 on a log axis): skip a label that would touch the previous one
+    last_end = -1e9
     for v in xticks:
-        svg.text(xs(v), bottom + out + 1.5 + fs, fmt_tick(v))
+        lab = fmt_tick(v)
+        wl = text_width(lab, fs)
+        if xs(v) - wl / 2 < last_end + fs * 0.25:
+            continue
+        svg.text(xs(v), bottom + out + 1.5 + fs, lab)
+        last_end = xs(v) + wl / 2
     svg.close()
     svg.add(f'<clipPath id="plotclip"><rect x="{left:.2f}" y="{top - 1:.2f}" width="{right - left:.2f}" height="{bottom - top + 1:.2f}"/></clipPath>')
     svg.add('<g clip-path="url(#plotclip)">')
     counts = []
+    marks: list[tuple[float, float]] = []  # drawn positions, to keep the legend off the data
     for i, (name, pts) in enumerate(series):
         color = color_for(cfg, name, i)
-        counts.append((name, len(pts)))
+        counts.append((rt.plain(cfg["group_labels"].get(name, name)), len(pts)))
         svg.open("group", group=name, index=i)
         rids = rows_of.get(name, [])
         if t == "xy":
             for k, (x, y) in enumerate(pts):
                 svg.marker(xs(x), ys(y), color, extra=f' data-row="{attr(rids[k] if k < len(rids) else "")}" data-v="{y:.6g}" data-x="{x:.6g}"')
+                marks.append((xs(x), ys(y)))
             if cfg["regression_line"] and len(pts) >= 2 and np.ptp([p[0] for p in pts]) > 0:
                 X = np.array([p[0] for p in pts])
                 Y = np.array([p[1] for p in pts])
@@ -975,19 +1130,59 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
                 svg.add(f'<path d="{path}" fill="none" stroke="{color}" stroke-width="{lw * 1.4:.2f}"/>')
         else:
             summ = summaries[i][1]
+            if cfg["show_points"]:
+                # replicates first, lighter, slightly spread so that identical values stay visible
+                byx_k: dict[float, int] = {}
+                for k, (x, y) in enumerate(pts):
+                    j = byx_k.get(x, 0)
+                    byx_k[x] = j + 1
+                    off = (van_der_corput(j) - 0.5) * cfg["point_size_pt"] * 0.9 * float(cfg.get("jitter", 0.5) or 0) * 2
+                    svg.marker(xs(x) + off, ys(y), color, size=cfg["point_size_pt"] * 0.6, opacity=0.35,
+                               extra=f' data-row="{attr(rids[k] if k < len(rids) else "")}" data-v="{y:.6g}" data-x="{x:.6g}"')
+                    marks.append((xs(x), ys(y)))
             path = " ".join(f"{'M' if k == 0 else 'L'}{xs(x):.2f},{ys(c):.2f}" for k, (x, c, *_r) in enumerate(summ))
             svg.add(f'<path d="{path}" fill="none" stroke="{color}" stroke-width="{lw * 1.4:.2f}"/>')
             for x, c, el, eh, _n in summ:
                 _errbar(svg, xs(x), ys, el, eh, 2.0, lw, color)
                 svg.marker(xs(x), ys(c), color, opacity=1.0)
-            if cfg["show_points"]:
-                for k, (x, y) in enumerate(pts):
-                    svg.marker(xs(x), ys(y), color, size=cfg["point_size_pt"] * 0.6, opacity=0.4,
-                               extra=f' data-row="{attr(rids[k] if k < len(rids) else "")}" data-v="{y:.6g}" data-x="{x:.6g}"')
+                marks.append((xs(x), ys(c)))
+                if eh is not None:
+                    marks.append((xs(x), ys(eh)))
         svg.close()
     svg.add("</g>")
+    if star_rows:
+        top_at: dict[float, float] = {}
+        for i, (name, pts) in enumerate(series):
+            for x, y in (pts if cfg["show_points"] else []):
+                top_at[x] = min(top_at.get(x, 1e9), ys(y))
+            for x, c, el, eh, _n in summaries[i][1]:
+                top_at[x] = min(top_at.get(x, 1e9), ys(eh if eh is not None else c))
+        svg.open("x-stars")
+        placed: list[tuple[float, float, float]] = []  # (x0, x1, baseline) of labels already drawn
+        for x, k, lab in star_rows:
+            color = "#000" if len(series) == 2 else color_for(cfg, series[k + 1][0], k + 1)
+            y0 = max(min(top_at.get(x, top), bottom), top - n_star_rows * fs * 1.05 + fs) - 2.5 - k * fs * 1.05
+            size = fs if lab.startswith("*") or lab == "ns" else fs * 0.85
+            half = text_width(lab, size) / 2 + 1
+            # close X values (20 and 60 on a linear axis): lift a label that would sit on its neighbour
+            for _ in range(4):
+                hit = [b for b in placed if b[0] < xs(x) + half and xs(x) - half < b[1] and abs(b[2] - y0) < fs * 0.95]
+                if not hit:
+                    break
+                y0 = min(b[2] for b in hit) - fs * 0.95
+            placed.append((xs(x) - half, xs(x) + half, y0))
+            svg.text(xs(x), y0 if lab.startswith("*") else y0 - fs * 0.15, lab, size=size, extra=f' fill="{color}"' if color != "#000" else "")
+            marks.append((xs(x), y0 - fs * 0.4))
+        svg.close()
     if (cfg["legend"] == "auto" and len(series) > 1) or cfg["legend"] is True:
-        lx = right - max(text_width(n, fs) for n, _ in series) - 14
+        shown = [rt.plain(cfg["group_labels"].get(n, n)) for n, _ in series]
+        lw_box = max(text_width(n, fs) for n in shown) + 14
+        lh = fs * 1.4 * len(series)
+        # top-right unless the data are there (rising curves): then top-left
+        def crowd(x0: float) -> int:
+            return sum(1 for (mx, my) in marks if x0 - 4 <= mx <= x0 + lw_box and top - 2 <= my <= top + lh + 4)
+        lx_r, lx_l = right - lw_box, left + 8
+        lx = lx_r if crowd(lx_r) <= crowd(lx_l) else lx_l
         ly = top + 2
         lx += float(cfg.get("legend_dx") or 0)
         ly += float(cfg.get("legend_dy") or 0)
@@ -995,10 +1190,101 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
         for i, (name, _) in enumerate(series):
             color = color_for(cfg, name, i)
             svg.marker(lx, ly + fs * 0.5, color)
-            svg.text(lx + 6, ly + fs * 0.85, name, anchor="start")
+            svg.text(lx + 6, ly + fs * 0.85, cfg["group_labels"].get(name, name), anchor="start")
             ly += fs * 1.4
         svg.close()
-    return caption(cfg, counts, lang)
+    cap = caption(cfg, counts, lang)
+    if xmap and any(k != v for k, v in xmap.items()):
+        pooled = [cl for cl in close_x_clusters(raw_x) if len(cl) > 1]
+        txt = "; ".join(f"{' / '.join(fmt_tick(v) for v in cl)} → {fmt_tick(xmap[cl[0]])}" for cl in pooled)
+        cap += (f" Valeurs de X proches regroupées : {txt}." if lang == "fr" else f" Close X values pooled: {txt}.")
+    return cap + star_txt
+
+
+def _render_panels(content: dict, cfg_in: dict, ycols: list[str], results: dict | None, lang: str) -> dict:
+    """Small multiples: one panel per Y variable (A, B, C…), same X, same groups and colours, one legend.
+    Every panel is the normal renderer at its cell size, so each panel looks exactly like a single figure."""
+    from .layout import _inner, letter
+
+    cfg = merged_config(cfg_in)
+    n = len(ycols)
+    ncol = int(cfg.get("panel_cols") or 0) or (n if n <= 3 else (2 if n == 4 else 3))
+    ncol = max(1, min(ncol, n))
+    nrow = math.ceil(n / ncol)
+    W, H = cfg["width_mm"] * MM, cfg["height_mm"] * MM
+    fs = cfg["font_size_pt"]
+    title_h = cfg["title_size_pt"] * 1.8 if cfg["title"] else 0.0
+    gap = 2.0 * MM
+    letters = bool(cfg.get("panel_letters", True))
+    strip = fs * 1.35 if letters else 0.0  # the letter sits in its own strip, never on the axis title
+    cw = (W - gap * (ncol - 1)) / ncol
+    ch = (H - title_h - gap * (nrow - 1)) / nrow - strip
+    # the same colour for a group in every panel, whatever groups a panel happens to have
+    colors = dict(cfg.get("colors") or {})
+    color_by = cfg.get("color_by") if col_by_id(content, cfg.get("color_by")) else None
+    order = list(cfg.get("group_order") or [])
+    if color_by:
+        seen = []
+        for r in content["rows"]:
+            v = _label(r["cells"].get(color_by))
+            if v is not None and v not in seen:
+                seen.append(v)
+        order = [g for g in order if g in seen] + [g for g in seen if g not in order]
+        pal = PALETTES.get(cfg["palette"], PALETTES["okabe_ito"])
+        for i, g in enumerate(order):
+            colors.setdefault(g, pal[i % len(pal)])
+    y_labels = cfg.get("y_labels") or {}
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="{cfg["width_mm"]:g}mm" height="{cfg["height_mm"]:g}mm" '
+             f'viewBox="0 0 {W:.2f} {H:.2f}" font-family="{FONT_STACK.get(cfg["font_family"], FONT_STACK["Arial"])}">']
+    if cfg["background"] != "transparent":
+        parts.append(f'<rect x="0" y="0" width="{W:.2f}" height="{H:.2f}" fill="#FFFFFF"/>')
+    warnings: list[dict] = []
+    caps: list[str] = []
+    names: list[str] = []
+    for k, yc in enumerate(ycols):
+        r, c = divmod(k, ncol)
+        sub = {**(cfg_in or {}), "y": [yc], "y_layout": "overlay", "title": "", "annotations": [],
+               "width_mm": cw / MM, "height_mm": ch / MM, "colors": colors, "group_order": order or None,
+               "y_label": y_labels.get(yc) or "", "y_unit": "", "y_min": None, "y_max": None, "y_tick_step": None,
+               **({k2: v for k2, v in ((cfg.get("per_panel") or {}).get(yc) or {}).items() if k2 in ("y_min", "y_max", "y_tick_step", "y_scale")}),
+               "legend": cfg["legend"] if k == 0 else False}
+        try:
+            out = render_figure(content, sub, results, lang)
+        except FigureError as e:
+            out = {"svg": f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {cw:.2f} {ch:.2f}"><text x="{cw / 2:.2f}" y="{ch / 2:.2f}" font-size="{fs:.2f}" text-anchor="middle" fill="#B00">{escape(e.message.get(lang, e.message["en"]))}</text></svg>',
+                   "caption": "", "warnings": []}
+        x0, y0 = c * (cw + gap), title_h + r * (ch + strip + gap)
+        parts.append(f'<g data-ycol="{attr(yc)}" transform="translate({x0:.2f} {y0:.2f})">')
+        if letters:
+            parts.append(f'<text data-el="panel-label" x="{fs * 0.1:.2f}" y="{fs * 1.15:.2f}" font-size="{fs * 1.25:.2f}" font-weight="bold" fill="#000">{letter(k, "A")}</text>')
+        parts.append(f'<g transform="translate(0 {strip:.2f})">{_inner(out["svg"], k)}</g>')
+        parts.append("</g>")
+        for w in out["warnings"]:
+            if w not in warnings:
+                warnings.append(w)
+        caps.append(out["caption"])
+        names.append(rt.plain(y_labels.get(yc) or col_by_id(content, yc)["name"]))
+    if cfg["title"]:
+        tsvg = SVG(W, H, cfg)
+        tsvg.open("title", drag="title")
+        tsvg.text(W / 2 + float(cfg.get("title_dx") or 0), cfg["title_size_pt"] * 1.2 + float(cfg.get("title_dy") or 0), cfg["title"], size=cfg["title_size_pt"], weight="bold")
+        tsvg.close()
+        parts.extend(tsvg.items)
+    tsvg = SVG(W, H, cfg)
+    for k2, a in enumerate(cfg.get("annotations") or []):
+        if a.get("type") == "text" and a.get("text"):
+            tsvg.open("annotation", index=k2, drag="annotation")
+            tsvg.text(a.get("x", 0.5) * W, a.get("y", 0.1) * H, a["text"], size=a.get("size_pt", fs), weight="bold" if a.get("bold") else "normal",
+                      cls="manual-annotation", extra=' data-manual="true"')
+            tsvg.close()
+    parts.extend(tsvg.items)
+    parts.append("</svg>")
+    lst = ", ".join(f"{letter(i, 'A')}, {nm}" for i, nm in enumerate(names))
+    base = caps[0] if caps else ""
+    cap = (f"{lst}. " if lang == "en" else f"{lst}. ") + base
+    if any(a.get("type") == "text" and a.get("text") for a in cfg.get("annotations") or []):
+        cap += " Manual annotation(s) added by the author." if lang == "en" else " Annotation(s) manuelle(s) ajoutée(s) par l’auteur."
+    return {"svg": "".join(parts), "caption": cap, "warnings": warnings}
 
 
 def to_pdf(svg: str) -> bytes:

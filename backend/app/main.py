@@ -1053,6 +1053,33 @@ def render_preview(project_id: str, body: RenderIn, user: User = Depends(current
     return _render(db, project_id, body.dataset_id, body.config, body.lang)
 
 
+class SuggestIn(BaseModel):
+    dataset_id: str
+    lang: Literal["en", "fr"] = "en"
+    style: dict = Field(default_factory=dict)  # the current figure's look (font, palette…), kept on every suggestion
+
+
+@app.post("/api/projects/{project_id}/figure-suggestions")
+def figure_suggestions(project_id: str, body: SuggestIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """A gallery of figures that fit this table, each rendered with the real data: the user picks one by clicking it."""
+    from .figures.suggest import STYLE_KEYS, suggestions
+
+    require(db, user, project_id, Action.VIEW)
+    d = _get_dataset(db, project_id, body.dataset_id)
+    style = {k: v for k, v in (body.style or {}).items() if k in STYLE_KEYS and k not in ("group_order", "group_labels")}
+    out = []
+    for s in suggestions(d.content):
+        cfg = {**style, **s["config"]}
+        try:
+            r = _render(db, project_id, d.id, cfg, body.lang)
+        except HTTPException:
+            continue
+        # several thumbnails share one page: keep their ids (clip paths) unique
+        svg = re.sub(r'(id="|url\(#)([A-Za-z_][\w-]*)', lambda m, k=len(out): f"{m.group(1)}sg{k}-{m.group(2)}", r["svg"])
+        out.append({**s, "config": cfg, "svg": svg})
+    return out
+
+
 @app.get("/api/projects/{project_id}/figures/{figure_id}/export")
 def export_figure(
     project_id: str,
