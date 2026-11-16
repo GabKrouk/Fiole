@@ -4,7 +4,7 @@ import { api, ApiError, Dataset, FigureEntity } from "../api";
 import { Key, useI18n } from "../i18n";
 import type { ProjectCtx } from "../pages/ProjectPage";
 import { groupNames, StepButtons } from "./AnalysisView";
-import { factorColumns, levels, numericColumns } from "../columns";
+import { factorColumns, levels, numericColumns, stepColumns } from "../columns";
 import FigureCanvas, { Selection } from "./FigureCanvas";
 import RichInput from "./RichText";
 import StyleMenu from "./StyleMenu";
@@ -145,7 +145,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     const c = ds?.content;
     if (!c) return [];
     const ty = cfg.type ?? "scatter_groups";
-    if (GROUP_TYPES.includes(ty)) return groupNames(c, cfg);
+    if (GROUP_TYPES.includes(ty)) return cfg.color_by && cfg.group_col && cfg.value_col && cfg.color_by !== cfg.group_col ? levels(c, cfg.color_by) : groupNames(c, cfg);
     const ys: string[] = Array.isArray(cfg.y) ? cfg.y : cfg.y ? [cfg.y] : [];
     const names = (id: string) => c.columns.find((x) => x.id === id)?.name ?? id;
     if (cfg.color_by) return ys.length <= 1 || cfg.y_layout === "panels" ? levels(c, cfg.color_by) : ys.flatMap((y) => levels(c, cfg.color_by).map((l) => `${names(y)} – ${l}`));
@@ -328,6 +328,11 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   const isGroup = GROUP_TYPES.includes(type);
   const numericCols = numericColumns(ds?.content);
   const factorCols = factorColumns(ds?.content);
+  const stepCols = stepColumns(ds?.content);
+  // X groups of a bar / box / dot plot: text columns, and numeric columns with a few repeated values (time, dose)
+  const groupCols = [...factorCols, ...stepCols];
+  const clustered = isGroup && !!cfg.color_by && !!cfg.group_col && !!cfg.value_col && cfg.color_by !== cfg.group_col;
+  const xIsStep = isGroup && stepCols.some((c) => c.id === cfg.group_col);
   const yList: string[] = (Array.isArray(cfg.y) ? cfg.y : cfg.y ? [cfg.y] : []).filter((y: string) => y !== cfg.x);
   const yChoices = numericCols.filter((c) => c.id !== cfg.x);
   const panels = yList.length > 1 && cfg.y_layout === "panels";
@@ -444,8 +449,19 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                   <label className="field"><span>{t("xAxisGroups")}</span>
                     <select value={cfg.group_col ?? ""} disabled={!canEdit} onChange={(e) => set({ group_col: e.target.value || null, group_order: null })}>
                       {cfg.value_col ? <option value="">{t("none")}</option> : <option value="">{t("useTableDesign")}</option>}
-                      {factorCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      {groupCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                     </select></label>
+                  <label className="field"><span>{lang === "fr" ? "Couleur / sous-groupes (ex. traitement)" : "Colour / sub-groups (e.g. treatment)"}</span>
+                    <select value={cfg.color_by ?? ""} disabled={!canEdit || !cfg.group_col || !cfg.value_col} onChange={(e) => set({ color_by: e.target.value || null, group_order: null, ...(e.target.value ? { annotations: annotations.filter((a) => !(a.type === "pvalue" && a.all)), ...(cfg.x_stars ? {} : { x_stars: true, p_format: figurePFormat(cfg) }) } : {}) })}>
+                      <option value="">{t("none")}</option>
+                      {groupCols.filter((c) => c.id !== cfg.group_col).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                    <span className="small-text muted">{lang === "fr" ? "Côte à côte dans chaque groupe de X : par exemple une barre par traitement à chaque temps." : "Side by side within each X group: e.g. one bar per treatment at each time."}</span></label>
+                  {xIsStep && <label className="check"><input type="checkbox" disabled={!canEdit} checked={!!cfg.x_merge} onChange={(e) => set({ x_merge: e.target.checked })} />
+                    {lang === "fr" ? "Regrouper les X proches (ex. 21 et 23 min)" : "Pool close X values (e.g. 21 and 23 min)"}</label>}
+                  {xIsStep && canEdit && <button type="button" className="small wrap-btn" style={{ marginBottom: 10 }}
+                    onClick={() => set({ type: "line", x: cfg.group_col, y: [cfg.value_col], color_by: cfg.color_by ?? null, error: cfg.error && cfg.error !== "sd" ? cfg.error : "sem", center: "mean", show_points: true, group_order: null })}>
+                    ↗ {lang === "fr" ? "Voir en courbe (une courbe par sous-groupe)" : "Show as curves (one per sub-group)"}</button>}
                   <label className="field"><span>{t("valueColPick")}</span>
                     <div className="row tight" style={{ flexWrap: "nowrap" }}>
                       <select className="grow" value={cfg.value_col ?? ""} disabled={!canEdit} onChange={(e) => switchY({ value_col: e.target.value || null, ...(e.target.value ? {} : { group_col: null }) })}>
@@ -651,7 +667,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
           <details open>
             <summary>{t("annotations")}</summary>
             <div>
-              {isGroup && (
+              {isGroup && !clustered && (
                 <>
                   <div className={`stars-box ${starsAnn ? "on" : ""}`}>
                     <label className="switch">
@@ -706,13 +722,13 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                   <hr style={{ border: "none", borderTop: "1px solid var(--line-2)", margin: "10px 0" }} />
                 </>
               )}
-              {type === "line" && (
+              {(type === "line" || clustered) && (
                 <>
                   <div className={`stars-box ${cfg.x_stars ? "on" : ""}`}>
                     <label className="switch">
                       <input type="checkbox" role="switch" disabled={!canEdit || order.length < 2} checked={!!cfg.x_stars} onChange={(e) => set({ x_stars: e.target.checked, p_format: figurePFormat(cfg) })} />
                       <span className="switch-track" aria-hidden />
-                      <b>★ {lang === "fr" ? "Étoiles à chaque valeur de X" : "Stars at each X value"}</b>
+                      <b>★ {lang === "fr" ? (clustered ? "Étoiles dans chaque groupe de X" : "Étoiles à chaque valeur de X") : (clustered ? "Stars within each X group" : "Stars at each X value")}</b>
                     </label>
                     {order.length < 2 && <p className="small-text muted" style={{ margin: "6px 0 0" }}>{lang === "fr" ? "Choisissez d’abord « Couleur / séparer par » (au moins deux groupes)." : "First choose “Colour / split by” (at least two groups)."}</p>}
                     {cfg.x_stars && order.length >= 2 && <>

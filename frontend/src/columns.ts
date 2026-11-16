@@ -32,3 +32,13 @@ export function smartDefaults(c: TableContent | undefined): { group_col?: string
   if (!f.length || !n.length) return {};
   return { group_col: f[0].id, value_col: n[0].id };
 }
+
+/** Numeric columns with a few repeated values (time points, doses): usable as groups on X. */
+export function stepColumns(c: TableContent | undefined): Column[] {
+  if (!c) return [];
+  return numericColumns(c).filter((col) => {
+    const vals = c.rows.map((r) => r.cells[col.id]).filter((v): v is number => typeof v === "number");
+    const d = new Set(vals).size;
+    return d >= 2 && d <= 15 && d <= vals.length / 2;
+  });
+}
