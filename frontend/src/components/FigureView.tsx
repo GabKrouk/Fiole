@@ -36,8 +36,11 @@ const PALETTES: Record<string, string[]> = {
 const Y_KEYS = ["y_min", "y_max", "y_tick_step", "y_scale", "y_label", "y_unit"];
 const GROUP_TYPES = ["scatter_groups", "bar", "box", "violin"];
 const XY_TYPES = ["xy", "line"];
+const STYLE_KEEP = ["font_family", "font_size_pt", "title_size_pt", "line_width_pt", "point_size_pt", "point_shape", "palette", "colors", "frame",
+  "tick_direction", "tick_length_pt", "minor_ticks", "fill_opacity", "title", "background"];
 
 type Cfg = Record<string, any>;
+type Warn = { en: string; fr: string; action?: { en: string; fr: string; patch: Cfg } };
 
 export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   const { figureId } = useParams();
@@ -51,7 +54,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   const [ds, setDs] = useState<Dataset | null>(null);
   const [svg, setSvg] = useState("");
   const [caption, setCaption] = useState("");
-  const [warnings, setWarnings] = useState<{ en: string; fr: string }[]>([]);
+  const [warnings, setWarnings] = useState<Warn[]>([]);
   const [renderErr, setRenderErr] = useState("");
   const [saveErr, setSaveErr] = useState("");
   const renderSeq = useRef(0);
@@ -63,8 +66,8 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   const [bg, setBg] = useState<"white" | "transparent">("white");
   const [selected, setSelected] = useState<Selection | null>(null);
   const [rendering, setRendering] = useState(false);
-  const renderCache = useRef(new Map<string, { svg: string; caption: string; warnings: { en: string; fr: string }[] }>());
-  const [multiYState, setMultiY] = useState<boolean | null>(null);
+  const renderCache = useRef(new Map<string, { svg: string; caption: string; warnings: Warn[] }>());
+  const [galleryOpen, setGalleryOpen] = useState(() => new URLSearchParams(window.location.search).has("gallery"));
   const [perVarOpen, setPerVarOpen] = useState(false);
   const undoStack = useRef<Cfg[]>([]);
   const redoStack = useRef<Cfg[]>([]);
@@ -105,7 +108,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     if (!fig) return;
     const body = { dataset_id: fig.dataset_id, config: { ...cfg, background: bg }, lang };
     const key = JSON.stringify(body) + `#${dsVersion}#${linkedKey}`;
-    const show = (r: { svg: string; caption: string; warnings: { en: string; fr: string }[] }) => {
+    const show = (r: { svg: string; caption: string; warnings: Warn[] }) => {
       setSvg(r.svg);
       setCaption(r.caption);
       setWarnings(r.warnings);
@@ -123,7 +126,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
       const seq = ++renderSeq.current;
       setRendering(true);
       try {
-        const r = await api.post<{ svg: string; caption: string; warnings: { en: string; fr: string }[] }>(`/api/projects/${pid}/render`, body);
+        const r = await api.post<{ svg: string; caption: string; warnings: Warn[] }>(`/api/projects/${pid}/render`, body);
         const cache = renderCache.current;
         cache.set(key, r);
         if (cache.size > 40) cache.delete(cache.keys().next().value!);
@@ -145,7 +148,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     if (GROUP_TYPES.includes(ty)) return groupNames(c, cfg);
     const ys: string[] = Array.isArray(cfg.y) ? cfg.y : cfg.y ? [cfg.y] : [];
     const names = (id: string) => c.columns.find((x) => x.id === id)?.name ?? id;
-    if (cfg.color_by) return ys.length <= 1 ? levels(c, cfg.color_by) : ys.flatMap((y) => levels(c, cfg.color_by).map((l) => `${names(y)} – ${l}`));
+    if (cfg.color_by) return ys.length <= 1 || cfg.y_layout === "panels" ? levels(c, cfg.color_by) : ys.flatMap((y) => levels(c, cfg.color_by).map((l) => `${names(y)} – ${l}`));
     return ys.map(names);
   }, [ds, cfg]);
 
@@ -209,8 +212,8 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => { saveChain.current = saveChain.current.then(flushSave); }, 500);
   }
-  const set = (p: Cfg) => {
-    const next = { ...cfg, ...p };
+  const set = (p: Cfg, replace = false) => {
+    const next = replace ? p : { ...cfg, ...p };
     // group rapid edits (typing, sliders) into one undo step
     if (Date.now() - lastPush.current > 700) {
       undoStack.current.push(cfg);
@@ -258,7 +261,9 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
     switch (s.el) {
       case "title": return { value: cfg.title ?? "", commit: (v: string) => set({ title: v }) };
       case "x-label": return { value: cfg.x_label || autoName(isGroup ? cfg.group_col : cfg.x), commit: (v: string) => set({ x_label: v }) };
-      case "y-label": return { value: cfg.y_label || autoName(isGroup ? cfg.value_col : (cfg.y ?? [])[0]), commit: (v: string) => set({ y_label: v }) };
+      case "y-label":
+        if (s.ycol && cfg.y_layout === "panels") return { value: (cfg.y_labels ?? {})[s.ycol] || autoName(s.ycol), commit: (v: string) => set({ y_labels: { ...(cfg.y_labels ?? {}), [s.ycol!]: v } }) };
+        return { value: cfg.y_label || autoName(isGroup ? cfg.value_col : (cfg.y ?? [])[0]), commit: (v: string) => set({ y_label: v }) };
       case "group-label": return { value: (cfg.group_labels ?? {})[s.group!] ?? s.group!, commit: (v: string) => set({ group_labels: { ...(cfg.group_labels ?? {}), [s.group!]: v } }) };
       case "annotation": {
         const k = s.index!;
@@ -325,7 +330,28 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
   const factorCols = factorColumns(ds?.content);
   const yList: string[] = (Array.isArray(cfg.y) ? cfg.y : cfg.y ? [cfg.y] : []).filter((y: string) => y !== cfg.x);
   const yChoices = numericCols.filter((c) => c.id !== cfg.x);
-  const multiY = multiYState ?? yList.length > 1;
+  const panels = yList.length > 1 && cfg.y_layout === "panels";
+  // several Y variables: one panel each (A, B, C…) by default, since they rarely share a unit
+  function panelSize(n: number): Cfg {
+    const cols = Number(cfg.panel_cols) || (n <= 3 ? n : n === 4 ? 2 : 3);
+    const rows = Math.ceil(n / Math.min(cols, n));
+    return { width_mm: Math.max(w, cols === 1 ? 85 : 180), height_mm: Math.min(240, Math.max(h, rows * 60)) };
+  }
+  function setYs(ys: string[]) {
+    if (!ys.length) return;
+    if (ys.length === 1 && yList.length === 1) return switchY({ y: ys });
+    const patch: Cfg = { y: ys };
+    if (ys.length > 1 && yList.length <= 1 && cfg.y_layout !== "overlay") Object.assign(patch, { y_layout: "panels" }, panelSize(ys.length));
+    else if (ys.length > 1 && cfg.y_layout === "panels") Object.assign(patch, panelSize(ys.length));
+    set(patch);
+  }
+  function toggleY(id: string) {
+    if (yList.includes(id)) { if (yList.length > 1) setYs(yList.filter((y) => y !== id)); }
+    else setYs([...yList, id]);
+  }
+  function setLayoutMode(m: "panels" | "overlay") {
+    set(m === "panels" ? { y_layout: "panels", ...panelSize(yList.length) } : { y_layout: "overlay" });
+  }
   const order: string[] = (cfg.group_order as string[] | undefined)?.filter((g) => groups.includes(g)).concat(groups.filter((g) => !(cfg.group_order || []).includes(g))) ?? groups;
   const palette = PALETTES[cfg.palette ?? "okabe_ito"];
   const w = cfg.width_mm ?? 80;
@@ -362,6 +388,7 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
           <button className="small" onClick={redo} disabled={!redoStack.current.length} title="Ctrl/Cmd+Shift+Z">↷ {lang === "fr" ? "Rétablir" : "Redo"}</button>
           <button className="small" title={lang === "fr" ? "Copie identique (Cmd/Ctrl+C puis Cmd/Ctrl+V marche aussi)" : "Identical copy (Cmd/Ctrl+C then Cmd/Ctrl+V works too)"}
             onClick={() => duplicate()}>⧉ {lang === "fr" ? "Dupliquer" : "Duplicate"}</button>
+          <button className="small primary" onClick={() => setGalleryOpen(true)} title={lang === "fr" ? "Des figures faites avec vos données : cliquez celle que vous voulez" : "Figures made with your data: click the one you want"}>✦ {lang === "fr" ? "Galerie" : "Gallery"}</button>
           <button className="small" onClick={() => setPerVarOpen(true)}>▦ {lang === "fr" ? "Une figure par variable…" : "One figure per variable…"}</button>
           <StyleMenu cfg={cfg} set={set} canEdit={canEdit} builtins={Object.entries(PRESETS).map(([k, p]) => [k, p.label[lang === "fr" ? 0 : 1]])}
             applyBuiltin={(k) => set(PRESETS[k].cfg(Number(cfg.width_mm) || 80, Number(cfg.height_mm) || 70))} />
@@ -373,6 +400,16 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
           nav(`/p/${pid}`);
         }}>{t("delete")}</button>}
       </div>
+      {galleryOpen && <Gallery pid={pid} datasetId={fig.dataset_id} lang={lang} cfg={cfg} canEdit={canEdit}
+        onClose={() => { setGalleryOpen(false); if (window.location.search.includes("gallery")) nav(window.location.pathname, { replace: true }); }}
+        onPick={(c) => {
+          // keep the look (font, palette, colours) and texts of this figure; take the data mapping of the suggestion
+          const keep = Object.fromEntries(Object.entries(cfg).filter(([k]) => STYLE_KEEP.includes(k)));
+          lastPush.current = 0;
+          set({ ...keep, ...c, annotations: [...((c.annotations as Cfg[]) ?? []), ...annotations.filter((a) => a.type === "text")] }, true);
+          setGalleryOpen(false);
+          if (window.location.search.includes("gallery")) nav(window.location.pathname, { replace: true });
+        }} />}
       {perVarOpen && <PerVariable cols={(GROUP_TYPES.includes(cfg.type ?? "scatter_groups") ? numericCols.filter((c) => c.id !== cfg.value_col) : yChoices.filter((c) => !yList.includes(c.id)))}
         lang={lang} onClose={() => setPerVarOpen(false)} onGo={async (cols) => { await duplicate(cols); setPerVarOpen(false); }} />}
       <div className="fig-layout">
@@ -394,6 +431,8 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                     if (x && x !== cfg.x) patch.x = x;
                     if (!yList.length || (x && yList.includes(x))) { const y = (cfg.value_col && cfg.value_col !== x ? cfg.value_col : numericCols.find((c) => c.id !== x)?.id); if (y) patch.y = [y]; }
                     if (cfg.color_by === undefined && cfg.group_col) patch.color_by = cfg.group_col;
+                    // time courses: mean ± SEM with the replicates shown, as in most papers
+                    if (ty === "line" && type !== "line") Object.assign(patch, { error: cfg.error && cfg.error !== "sd" ? cfg.error : "sem", center: "mean", show_points: true });
                   }
                   set(patch);
                 }}>
@@ -426,19 +465,33 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                       if (!y.length) { const other = numericCols.find((c) => c.id !== x); y = other ? [other.id] : []; }
                       set({ x, y });
                     }}><option value="">—</option>{numericCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
-                  {!multiY ? (
-                    <label className="field"><span>{lang === "fr" ? "Colonne Y" : "Y column"}</span>
-                      <span className="row tight">
-                        <select className="grow" value={yList[0] ?? ""} disabled={!canEdit} onChange={(e) => switchY({ y: e.target.value ? [e.target.value] : [] })}>
-                          <option value="">—</option>{yChoices.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
-                        {yList[0] && <StepButtons cols={yChoices.map((c) => c.id)} value={yList[0]} disabled={!canEdit} onChange={(v) => switchY({ y: [v] })} />}
-                      </span></label>
-                  ) : (
-                    <div className="field"><span>{t("yColumns")}</span>
-                      {yChoices.map((c) => (
-                        <label key={c.id} className="check" style={{ marginBottom: 2 }}><input type="checkbox" disabled={!canEdit} checked={yList.includes(c.id)}
-                          onChange={(e) => set({ y: e.target.checked ? [...yList, c.id] : yList.filter((x: string) => x !== c.id) })} /> {c.name}</label>
-                      ))}
+                  <div className="field"><span>{lang === "fr" ? "Variables Y — cliquez pour en ajouter ou en retirer" : "Y variables — click to add or remove"}</span>
+                    <div className="y-chips" role="group" aria-label="Y">
+                      {yChoices.map((c) => {
+                        const k = yList.indexOf(c.id);
+                        return <button key={c.id} type="button" className={`y-chip ${k >= 0 ? "on" : ""}`} aria-pressed={k >= 0} disabled={!canEdit}
+                          title={k >= 0 ? (lang === "fr" ? "Retirer" : "Remove") : (lang === "fr" ? "Ajouter" : "Add")} onClick={() => toggleY(c.id)}>
+                          {k >= 0 && yList.length > 1 && <b>{String.fromCharCode(65 + k)}</b>}{c.name}</button>;
+                      })}
+                    </div>
+                    <div className="row tight" style={{ marginTop: 4 }}>
+                      <button type="button" className="ghost small" disabled={!canEdit || yList.length === yChoices.length} onClick={() => setYs(yChoices.map((c) => c.id))}>{lang === "fr" ? "Toutes" : "All"}</button>
+                      <button type="button" className="ghost small" disabled={!canEdit || yList.length <= 1} onClick={() => setYs(yList.slice(0, 1))}>{lang === "fr" ? "Une seule" : "Just one"}</button>
+                      {yList.length === 1 && <span className="row tight" style={{ marginLeft: "auto" }} title={lang === "fr" ? "Variable précédente / suivante" : "Previous / next variable"}>
+                        <StepButtons cols={yChoices.map((c) => c.id)} value={yList[0]} disabled={!canEdit} onChange={(v) => switchY({ y: [v] })} /></span>}
+                    </div>
+                  </div>
+                  {yList.length > 1 && (
+                    <div className="field"><span>{lang === "fr" ? "Plusieurs variables" : "Several variables"}</span>
+                      <div className="seg" role="group">
+                        <button type="button" className={panels ? "on" : ""} disabled={!canEdit} onClick={() => setLayoutMode("panels")}>▦ {lang === "fr" ? "Un panneau chacune" : "One panel each"}</button>
+                        <button type="button" className={!panels ? "on" : ""} disabled={!canEdit} onClick={() => setLayoutMode("overlay")}>≡ {lang === "fr" ? "Superposées" : "Overlaid"}</button>
+                      </div>
+                      {panels && <label className="row tight small-text" style={{ marginTop: 6 }}>{lang === "fr" ? "Panneaux par ligne" : "Panels per row"}
+                        <select value={cfg.panel_cols ?? 0} disabled={!canEdit} onChange={(e) => set({ panel_cols: Number(e.target.value) || null })}>
+                          <option value={0}>{t("auto")}</option>{[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n}</option>)}</select>
+                        <label className="check" style={{ margin: "0 0 0 8px" }}><input type="checkbox" disabled={!canEdit} checked={cfg.panel_letters ?? true} onChange={(e) => set({ panel_letters: e.target.checked })} /> A, B, C…</label>
+                      </label>}
                     </div>
                   )}
                   <label className="field"><span>{t("colorBy")}</span>
@@ -446,10 +499,16 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                       <option value="">{t("none")}</option>
                       {factorCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                     </select>
-                    <span className="small-text muted">{lang === "fr" ? "Une couleur, une droite et une entrée de légende par modalité (ex. génotype)." : "One colour, one line and one legend entry per level (e.g. genotype)."}</span></label>
-                  <label className="check small-text"><input type="checkbox" disabled={!canEdit} checked={multiY}
-                    onChange={(e) => { if (!e.target.checked) set({ y: yList.slice(0, 1) }); setMultiY(e.target.checked); }} />
-                    {lang === "fr" ? "Avancé : plusieurs colonnes Y sur la même figure" : "Advanced: several Y columns on one figure"}</label>
+                    <span className="small-text muted">{lang === "fr" ? "Une couleur, une courbe et une entrée de légende par modalité (ex. traitement, génotype)." : "One colour, one curve and one legend entry per level (e.g. treatment, genotype)."}</span></label>
+                  {type === "line" && <>
+                    <label className="check"><input type="checkbox" disabled={!canEdit} checked={!!cfg.x_merge} onChange={(e) => set({ x_merge: e.target.checked })} />
+                      {lang === "fr" ? "Regrouper les X proches (ex. 21 et 23 min)" : "Pool close X values (e.g. 21 and 23 min)"}</label>
+                    <div className="seg" role="group" style={{ marginTop: 4 }}>
+                      {([["linear", "linear", lang === "fr" ? "Linéaire" : "Linear"], ["log10", "linear", "Log X"], ["log10", "log10", "Log-log"]] as const).map(([xs, ys2, lab]) => (
+                        <button key={lab} type="button" disabled={!canEdit} className={(cfg.x_scale ?? "linear") === xs && (cfg.y_scale ?? "linear") === ys2 ? "on" : ""}
+                          onClick={() => set({ x_scale: xs, y_scale: ys2, x_min: null, x_max: null, y_min: null, y_max: null })}>{lab}</button>))}
+                    </div>
+                  </>}
                 </>
               )}
             </div>
@@ -470,11 +529,20 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
             <div>
               <div className="field"><span>{t("title")}</span><RichInput ariaLabel={t("title")} value={cfg.title ?? ""} disabled={!canEdit} onChange={(v) => set({ title: v })} /></div>
               <div className="grid2">
-                <div className="field"><span>{t("yLabel")}</span><RichInput ariaLabel={t("yLabel")} value={cfg.y_label ?? ""} disabled={!canEdit} onChange={(v) => set({ y_label: v })} /></div>
-                <label className="field"><span>{t("unit")} Y</span><input value={cfg.y_unit ?? ""} disabled={!canEdit} onChange={(e) => set({ y_unit: e.target.value })} /></label>
+                {!panels && <>
+                  <div className="field"><span>{t("yLabel")}</span><RichInput ariaLabel={t("yLabel")} value={cfg.y_label ?? ""} disabled={!canEdit} onChange={(v) => set({ y_label: v })} /></div>
+                  <label className="field"><span>{t("unit")} Y</span><input value={cfg.y_unit ?? ""} disabled={!canEdit} onChange={(e) => set({ y_unit: e.target.value })} /></label>
+                </>}
                 <div className="field"><span>{t("xLabel")}</span><RichInput ariaLabel={t("xLabel")} value={cfg.x_label ?? ""} disabled={!canEdit} onChange={(v) => set({ x_label: v })} /></div>
                 {!isGroup && <label className="field"><span>{t("unit")} X</span><input value={cfg.x_unit ?? ""} disabled={!canEdit} onChange={(e) => set({ x_unit: e.target.value })} /></label>}
               </div>
+              {panels && <div className="field"><span>{lang === "fr" ? "Titre de l’axe Y de chaque panneau (vide = nom de la colonne)" : "Y axis title of each panel (empty = column name)"}</span>
+                {yList.map((y, k) => {
+                  const name = numericCols.find((c) => c.id === y)?.name ?? y;
+                  return <div key={y} className="row tight" style={{ marginBottom: 4, flexWrap: "nowrap" }}><b style={{ width: 16 }}>{String.fromCharCode(65 + k)}</b>
+                    <RichInput className="grow" ariaLabel={`Y ${name}`} value={(cfg.y_labels ?? {})[y] || name} disabled={!canEdit}
+                      onChange={(v) => set({ y_labels: { ...(cfg.y_labels ?? {}), [y]: v === name ? "" : v } })} /></div>;
+                })}</div>}
             </div>
           </details>
           {(isGroup || groups.length > 1) && (
@@ -638,6 +706,30 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                   <hr style={{ border: "none", borderTop: "1px solid var(--line-2)", margin: "10px 0" }} />
                 </>
               )}
+              {type === "line" && (
+                <>
+                  <div className={`stars-box ${cfg.x_stars ? "on" : ""}`}>
+                    <label className="switch">
+                      <input type="checkbox" role="switch" disabled={!canEdit || order.length < 2} checked={!!cfg.x_stars} onChange={(e) => set({ x_stars: e.target.checked, p_format: figurePFormat(cfg) })} />
+                      <span className="switch-track" aria-hidden />
+                      <b>★ {lang === "fr" ? "Étoiles à chaque valeur de X" : "Stars at each X value"}</b>
+                    </label>
+                    {order.length < 2 && <p className="small-text muted" style={{ margin: "6px 0 0" }}>{lang === "fr" ? "Choisissez d’abord « Couleur / séparer par » (au moins deux groupes)." : "First choose “Colour / split by” (at least two groups)."}</p>}
+                    {cfg.x_stars && order.length >= 2 && <>
+                      <p className="small-text muted" style={{ margin: "6px 0" }}>{lang === "fr" ? `${(cfg.group_labels ?? {})[order[0]] ?? order[0]} comparé à ${order.length === 2 ? ((cfg.group_labels ?? {})[order[1]] ?? order[1]) : "chacun des autres groupes"} à chaque X (le premier groupe de la liste sert de référence).` : `${order[0]} compared with ${order.length === 2 ? order[1] : "each other group"} at each X (the first group in the list is the reference).`}</p>
+                      <label className="field"><span>{t("testUsed")}</span>
+                        <select value={cfg.x_stars_test ?? "welch"} disabled={!canEdit} onChange={(e) => set({ x_stars_test: e.target.value })}>
+                          <option value="welch">{lang === "fr" ? "t de Welch (non apparié)" : "Welch t (unpaired)"}</option>
+                          <option value="student">{lang === "fr" ? "t de Student" : "Student t"}</option>
+                          <option value="mannwhitney">Mann–Whitney</option></select></label>
+                      <div className="field"><span>{lang === "fr" ? "Afficher sur la figure" : "Show on the figure"}</span><PFormat cfg={cfg} set={set} canEdit={canEdit} /></div>
+                      {figurePFormat(cfg) === "stars" && <StarThresholds cfg={cfg} set={set} canEdit={canEdit} />}
+                      <label className="check"><input type="checkbox" disabled={!canEdit} checked={!!cfg.hide_ns} onChange={(e) => set({ hide_ns: e.target.checked })} /> {lang === "fr" ? "Masquer les « ns »" : "Hide “ns”"}</label>
+                    </>}
+                  </div>
+                  <hr style={{ border: "none", borderTop: "1px solid var(--line-2)", margin: "10px 0" }} />
+                </>
+              )}
               {annotations.map((a, i) => a.type === "text" ? (
                 <div key={i} className="row" style={{ marginBottom: 6 }}>
                   <span className="badge manual">{t("manualTag")}</span>
@@ -691,7 +783,8 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
           {selected && <div style={{ marginTop: 10 }}><Inspector sel={selected} cfg={cfg} set={set} canEdit={canEdit} isGroup={isGroup}
             colorOf={(g) => (cfg.colors ?? {})[g] ?? palette[Math.max(0, order.indexOf(g)) % palette.length]} rowLabel={rowLabel}
             onShowRow={(r) => nav(`/p/${pid}/data/${fig.dataset_id}?row=${encodeURIComponent(r)}`)} onExcludeRow={excludeRow} onClose={() => setSelected(null)} /></div>}
-          {warnings.map((w, i) => <div key={i} className="notice warn" style={{ marginTop: 8 }}>{L(w)}</div>)}
+          {warnings.map((w, i) => <div key={i} className="notice warn row" style={{ marginTop: 8 }}><span className="grow">{L(w)}</span>
+            {w.action && canEdit && <button className="small primary" onClick={() => set(w.action!.patch)}>{L(w.action)}</button>}</div>)}
           {caption && <div className="panel" style={{ marginTop: 10 }}><h4>{t("caption")}</h4><p className="small-text" style={{ margin: 0 }}>{caption}</p></div>}
         </div>
       </div>
@@ -718,6 +811,38 @@ function PerVariable({ cols, lang, onClose, onGo }: { cols: { id: string; name: 
       {cols.map((c) => <label key={c.id} className="check"><input type="checkbox" checked={pick.includes(c.id)}
         onChange={(e) => setPick(e.target.checked ? [...pick, c.id] : pick.filter((x) => x !== c.id))} /> {c.name}</label>)}
       {!cols.length && <div className="empty">{T("Aucune autre colonne numérique.", "No other numeric column.")}</div>}
+    </Modal>
+  );
+}
+
+type Suggestion = { id: string; title: { en: string; fr: string }; description: { en: string; fr: string }; config: Cfg; svg: string };
+
+function Gallery({ pid, datasetId, lang, cfg, canEdit, onClose, onPick }: { pid: string; datasetId: string; lang: string; cfg: Cfg; canEdit: boolean; onClose: () => void; onPick: (c: Cfg) => void }) {
+  const T = (fr: string, en: string) => (lang === "fr" ? fr : en);
+  const [items, setItems] = useState<Suggestion[] | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    const style = Object.fromEntries(Object.entries(cfg).filter(([k]) => STYLE_KEEP.includes(k) && k !== "title"));
+    api.post<Suggestion[]>(`/api/projects/${pid}/figure-suggestions`, { dataset_id: datasetId, lang, style })
+      .then(setItems).catch((e) => setErr(String(e)));
+  }, [pid, datasetId, lang]); // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <Modal title={T("Galerie : choisissez un graphe", "Gallery: pick a figure")} onClose={onClose} wide footer={<button onClick={onClose}>{T("Fermer", "Close")}</button>}>
+      <p className="small-text muted" style={{ marginTop: 0 }}>{T(
+        "Ces figures sont faites avec les données de ce tableau. Cliquez celle qui vous convient : elle remplace la figure en cours (Annuler pour revenir), puis tout reste modifiable.",
+        "These figures are made with this table's data. Click the one you want: it replaces the current figure (Undo to go back), and everything stays editable.")}</p>
+      {err && <div className="notice error">{err}</div>}
+      {!items && !err && <div className="gallery">{[0, 1, 2, 3].map((i) => <div key={i} className="gallery-card skeleton" />)}</div>}
+      {items && !items.length && <div className="empty">{T("Pas de suggestion pour ce tableau : il faut au moins une colonne numérique.", "No suggestion for this table: at least one numeric column is needed.")}</div>}
+      {items && <div className="gallery">
+        {items.map((s) => (
+          <button key={s.id} type="button" className={`gallery-card ${s.id === "panels" ? "wide" : ""}`} disabled={!canEdit} onClick={() => onPick(s.config)}>
+            <div className="gallery-thumb" dangerouslySetInnerHTML={{ __html: s.svg }} />
+            <b>{lang === "fr" ? s.title.fr : s.title.en}</b>
+            <span className="small-text muted">{lang === "fr" ? s.description.fr : s.description.en}</span>
+          </button>
+        ))}
+      </div>}
     </Modal>
   );
 }
