@@ -1,19 +1,23 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api";
 import { useAuth } from "../App";
 import { useI18n } from "../i18n";
+import { saveFio } from "../lib/fio";
+import MoveDialog from "./MoveDialog";
 
 export interface MenuProject {
   id: string;
   name: string;
   role: string | null;
   via_link?: boolean;
+  folder_id?: string | null;
 }
 
 /**
  * The "⋯" menu of a project, on the dashboard cards and in the project window:
- * open in a new tab, rename, share, duplicate, export, and move to the trash (owner)
+ * open in a new tab, rename, share, duplicate, save as a .fio file, move to a folder, and move to the trash (owner)
  * or remove from my list (shared with me). Moving to the trash can be undone.
  */
 export default function ProjectMenu({ project, inProject, onChanged, onShare, toast }: {
@@ -28,6 +32,7 @@ export default function ProjectMenu({ project, inProject, onChanged, onShare, to
   const nav = useNavigate();
   const T = (fr: string, en: string) => (lang === "fr" ? fr : en);
   const [open, setOpen] = useState(false);
+  const [moving, setMoving] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const role = project.role ?? "viewer";
   const isOwner = role === "owner";
@@ -61,6 +66,14 @@ export default function ProjectMenu({ project, inProject, onChanged, onShare, to
     const r = await api.post<{ url: string }>(`/api/projects/${project.id}/duplicate`);
     nav(r.url);
   }
+  async function save() {
+    if (await saveFio(project.id, project.name)) toast(T(`« ${project.name} » est enregistré dans un fichier .fio.`, `“${project.name}” saved to a .fio file.`));
+  }
+  async function moveTo(folderId: string | null) {
+    await api.put(`/api/projects/${project.id}/folder`, { folder_id: folderId });
+    toast(folderId ? T("Projet rangé dans le dossier.", "Project moved to the folder.") : T("Projet remis au premier niveau.", "Project moved to the top level."));
+    onChanged?.();
+  }
   async function trash() {
     await api.del(`/api/projects/${project.id}`);
     const undo = async () => {
@@ -89,12 +102,17 @@ export default function ProjectMenu({ project, inProject, onChanged, onShare, to
           {canEdit && <button role="menuitem" onClick={act(rename)}>✎ {T("Renommer…", "Rename…")}</button>}
           <button role="menuitem" onClick={act(() => (onShare ? onShare() : nav(`/p/${project.id}?share=1`)))}>🔒 {T("Partager…", "Share…")}</button>
           <button role="menuitem" onClick={act(duplicate)}>⧉ {T("Dupliquer le projet", "Duplicate project")}</button>
-          <a role="menuitem" className="menu-link" href={`/api/projects/${project.id}/archive`} onClick={(e) => { e.stopPropagation(); setOpen(false); }}>⤓ {T("Exporter (.fiole.json)", "Export (.fiole.json)")}</a>
+          <button role="menuitem" onClick={act(save)}>💾 {T("Enregistrer dans un fichier .fio", "Save to a .fio file")}</button>
+          {!project.via_link && <button role="menuitem" onClick={act(() => setMoving(true))}>📁 {T("Déplacer vers un dossier…", "Move to a folder…")}</button>}
           {isOwner
             ? <><div className="menu-sep" /><button role="menuitem" className="danger" onClick={act(trash)}>🗑 {T("Mettre à la corbeille", "Move to trash")}</button></>
             : !project.via_link && <><div className="menu-sep" /><button role="menuitem" className="danger" onClick={act(leave)}>⊘ {T("Retirer de ma liste", "Remove from my list")}</button></>}
         </div>
       )}
+      {moving && createPortal(
+        <div onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
+          <MoveDialog what={project.name} current={project.folder_id ?? null} onPick={(f) => moveTo(f).catch(fail)} onClose={() => setMoving(false)} />
+        </div>, document.body)}
     </div>
   );
 }

@@ -20,6 +20,7 @@ export interface ProjectSummary {
   updated_at: string;
   last_opened_at: string | null;
   url: string;
+  folder_id?: string | null;
 }
 
 export interface Column {
