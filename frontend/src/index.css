@@ -499,3 +499,24 @@ button.gallery-card:hover:not(:disabled) { border-color: var(--accent) !importan
 .gallery-thumb { background: #fff; border-radius: 6px; padding: 4px; display: grid; place-items: center; margin-bottom: 4px; }
 .gallery-thumb svg { width: 100%; height: auto; max-height: 260px; }
 @media (max-width: 560px) { .gallery-card.wide { grid-column: auto; } }
+
+/* dashboard folders */
+.folder-card { position: relative; display: block; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); cursor: pointer; color: var(--ink); }
+.folder-card:hover, .folder-card:focus-visible { border-color: var(--accent); }
+.folder-card .name { font-weight: 600; margin-bottom: 6px; padding-right: 30px; display: flex; align-items: center; gap: 8px; }
+.folder-card .folder-ico { font-size: 20px; line-height: 1; }
+.folder-card .pmenu { position: absolute; top: 8px; right: 8px; }
+.folder-card.drop, .crumb.drop { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent) inset; }
+.project-card[draggable="true"] { cursor: pointer; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin: -6px 0 14px; }
+.crumb-wrap { display: inline-flex; align-items: center; gap: 2px; }
+.crumb { border: 1px solid transparent; background: none; padding: 4px 8px; border-radius: 6px; color: var(--ink-2); }
+.crumb:hover { background: var(--surface-2); color: var(--ink); }
+.crumb.current { color: var(--ink); font-weight: 600; }
+.crumb-sep { color: var(--ink-3); }
+.folder-pick-list { display: flex; flex-direction: column; gap: 2px; max-height: 50vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 4px; }
+.folder-pick { text-align: left; border: none; background: none; padding: 7px 10px; border-radius: 6px; color: var(--ink); }
+.folder-pick:hover { background: var(--surface-2); }
+.folder-pick.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.page.file-over { outline: 2px dashed var(--accent); outline-offset: -6px; border-radius: 12px; }
+.file-drop-hint { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); background: var(--accent); color: #fff; padding: 12px 20px; border-radius: 10px; box-shadow: var(--shadow); z-index: 90; pointer-events: none; font-weight: 600; }

@@ -19,7 +19,7 @@ const D = {
   sharedWithMe: { fr: "Partagés avec moi", en: "Shared with me" },
   recent: { fr: "Récents", en: "Recent" },
   newProject: { fr: "Nouveau projet", en: "New project" },
-  importArchive: { fr: "Importer une archive", en: "Import archive" },
+  importArchive: { fr: "Ouvrir un fichier .fio", en: "Open a .fio file" },
   projectName: { fr: "Nom du projet", en: "Project name" },
   create: { fr: "Créer", en: "Create" },
   cancel: { fr: "Annuler", en: "Cancel" },
@@ -181,7 +181,7 @@ const D = {
   missing: { fr: "manquantes", en: "missing" },
   excluded: { fr: "exclues", en: "excluded" },
   exportResults: { fr: "Exporter tous les résultats (CSV)", en: "Export all results (CSV)" },
-  exportArchive: { fr: "Archive du projet", en: "Project archive" },
+  exportArchive: { fr: "Enregistrer le fichier", en: "Save to file" },
   reportSoon: { fr: "Rapport complet (méthodes, résultats, figures)", en: "Full report (methods, results, figures)" },
   // figures
   figureType: { fr: "Type de figure", en: "Figure type" },

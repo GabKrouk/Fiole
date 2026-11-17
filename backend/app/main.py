@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import io
 import json
 import re
+import zipfile
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -36,6 +37,7 @@ from .models import (
     RawUpload,
     FigureStyle,
     FigureStyleShare,
+    ProjectFolder,
     GeneralAccess,
     ProjectLinkVisit,
     ADDED_COLUMNS,
@@ -47,6 +49,7 @@ from . import mailer
 from . import usage_report
 from . import sharing
 from . import sso
+from . import folders as folders_lib
 from . import styles as style_lib
 from .stats import ENGINE, catalog, run_analysis
 
@@ -69,6 +72,7 @@ def add_missing_columns():
 app = FastAPI(title="Fiole API", version="0.1.0", lifespan=lifespan)
 app.include_router(sharing.router)
 app.include_router(sso.router)
+app.include_router(folders_lib.router)
 app.middleware("http")(sso.cors_middleware)
 
 
@@ -179,6 +183,7 @@ def update_me(body: MeIn, user: User = Depends(current_user), db: Session = Depe
 class ProjectIn(BaseModel):
     name: str = Field(min_length=1, max_length=300)
     description: str = ""
+    folder_id: str | None = None  # created inside this dashboard folder of mine
 
 
 class ProjectPatch(BaseModel):
@@ -220,7 +225,9 @@ def list_projects(scope: Literal["mine", "shared", "recent", "trash"] = "mine", 
         .where(ProjectMember.user_id == user.id, Project.deleted_at.is_(None))
     )
     if scope == "mine":
-        q = q.where(Project.owner_id == user.id).order_by(Project.updated_at.desc())
+        # mine + the projects shared with me that I filed in one of my folders
+        filed = select(ProjectFolder.project_id).where(ProjectFolder.user_id == user.id)
+        q = q.where(or_(Project.owner_id == user.id, Project.id.in_(filed))).order_by(Project.updated_at.desc())
     elif scope == "shared":
         q = q.where(Project.owner_id != user.id).order_by(Project.updated_at.desc())
     else:
@@ -237,6 +244,9 @@ def list_projects(scope: Literal["mine", "shared", "recent", "trash"] = "mine", 
         key = "updated_at" if scope == "shared" else "last_opened_at"
         out.sort(key=lambda o: o[key] or "", reverse=True)
         out = out[:20] if scope == "recent" else out
+    where = folders_lib.folder_of(db, user, [o["id"] for o in out])
+    for o in out:
+        o["folder_id"] = where.get(o["id"])
     return out
 
 
@@ -247,10 +257,11 @@ def create_project(body: ProjectIn, user: User = Depends(current_user), db: Sess
     db.flush()
     m = ProjectMember(project_id=p.id, user_id=user.id, role=Role.owner, added_by=user.id, last_opened_at=utcnow())
     db.add(m)
+    folders_lib.place(db, user, p.id, body.folder_id)
     audit(db, user, p.id, "project.create", "project", p.id)
     db.commit()
     db.refresh(p)
-    return project_summary(db, p, user, m)
+    return {**project_summary(db, p, user, m), "folder_id": body.folder_id}
 
 
 def _analysis_out(a: Analysis, ds_version: int, last: AnalysisResult | None) -> dict:
@@ -311,6 +322,7 @@ def get_project(project_id: str, user: User = Depends(current_user), db: Session
     figures = db.execute(select(Figure).where(Figure.project_id == p.id).order_by(Figure.created_at)).scalars().all()
     return {
         **project_summary(db, p, user, m),
+        "folder_id": folders_lib.folder_of(db, user, [p.id]).get(p.id),
         "permissions": sorted(a.value for a in allowed_actions(db, user, p)),
         "datasets": [_dataset_meta(d) for d in datasets],
         "analyses": a_out,
@@ -375,9 +387,10 @@ def purge_project(project_id: str, user: User = Depends(current_user), db: Sessi
 def duplicate_project(project_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """A full copy (data, analyses, figures, layouts) owned by me, not shared with anyone."""
     p = require(db, user, project_id, Action.EXPORT)
-    doc = _archive_doc(db, p)
+    doc = _archive_doc(db, p, styles_of=None, uploads=None)
     doc["project"]["name"] = (f"{p.name} (copie)" if user.locale == "fr" else f"{p.name} (copy)")[:300]
-    return _import_doc(db, user, doc, "project.duplicate")
+    # the copy goes next to the original in my folders
+    return _import_doc(db, user, doc, "project.duplicate", folders_lib.folder_of(db, user, [p.id]).get(p.id))
 
 
 def touch(p: Project):
@@ -1694,65 +1707,152 @@ def import_style(body: dict, user: User = Depends(current_user), db: Session = D
     return style_lib.style_out(_new_style(db, user, name, str(body.get("description") or ""), body["settings"]), user, user.display_name)
 
 
-# ------------------------------------------------------------------ archive
-
+# ------------------------------------------------------------------ .fio project files
+#
+# A .fio file is a ZIP holding everything needed to rebuild a project on any Fiole account:
+#   fiole.json      data tables (with their version history), analyses, figures, layouts, and the
+#                   figure styles of the person who saved it
+#   uploads/<n>     the original imported files, byte for byte
+# Older exports (plain JSON, .fiole.json) open too. Analysis results are recomputed on opening, never trusted.
 
 ARCHIVE_FORMAT = "fiole-project"
-ARCHIVE_VERSION = 1
+ARCHIVE_VERSION = 2
+FIO_MAX_UNZIPPED = 400 * 1024 * 1024
+FIO_MIME = "application/vnd.fiole.project+zip"
 
 
 @app.get("/api/projects/{project_id}/archive")
 def export_archive(project_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Save the project as a .fio file."""
     p = require(db, user, project_id, Action.EXPORT)
-    doc = _archive_doc(db, p)
-    return Response(json.dumps(doc, ensure_ascii=False, indent=1), media_type="application/json",
-                    headers={"Content-Disposition": disposition(_safe(p.name) + f".fiole.json")})
+    files: dict[str, bytes] = {}
+    doc = _archive_doc(db, p, styles_of=user, uploads=files)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("mimetype", FIO_MIME, compress_type=zipfile.ZIP_STORED)
+        z.writestr("fiole.json", json.dumps(doc, ensure_ascii=False, indent=1))
+        for path, data in files.items():
+            z.writestr(path, data)
+    audit(db, user, p.id, "project.save_fio", "project", p.id)
+    db.commit()
+    return Response(buf.getvalue(), media_type=FIO_MIME, headers={"Content-Disposition": disposition(_safe(p.name) + ".fio")})
 
 
-def _archive_doc(db: Session, p: Project) -> dict:
-    datasets = db.execute(select(Dataset).where(Dataset.project_id == p.id)).scalars().all()
-    analyses = db.execute(select(Analysis).where(Analysis.project_id == p.id)).scalars().all()
-    figures = db.execute(select(Figure).where(Figure.project_id == p.id)).scalars().all()
-    doc = {
+def _archive_doc(db: Session, p: Project, styles_of: User | None = None, uploads: dict[str, bytes] | None = None) -> dict:
+    datasets = db.execute(select(Dataset).where(Dataset.project_id == p.id).order_by(Dataset.created_at)).scalars().all()
+    analyses = db.execute(select(Analysis).where(Analysis.project_id == p.id).order_by(Analysis.created_at)).scalars().all()
+    figures = db.execute(select(Figure).where(Figure.project_id == p.id).order_by(Figure.created_at)).scalars().all()
+    doc: dict[str, Any] = {
         "format": ARCHIVE_FORMAT,
         "format_version": ARCHIVE_VERSION,
         "exported_at": utcnow().isoformat(),
         "engine": ENGINE,
         "project": {"name": p.name, "description": p.description},
-        "datasets": [{"id": d.id, "name": d.name, "version": d.version, "content": d.content} for d in datasets],
+        "datasets": [],
         "analyses": [
             {"id": a.id, "dataset_id": a.dataset_id, "name": a.name, "kind": a.kind, "config": a.config,
              "last_result": (lambda r: {"dataset_version": r.dataset_version, "result": r.result} if r else None)(_last_result(db, a.id))}
             for a in analyses
         ],
-        "figures": [{"id": f.id, "dataset_id": f.dataset_id, "name": f.name, "config": f.config} for f in figures],
-        "layouts": [{"name": x.name, "config": x.config} for x in db.execute(select(Layout).where(Layout.project_id == p.id)).scalars()],
+        "figures": [{"id": f.id, "dataset_id": f.dataset_id, "name": f.name, "kind": f.kind, "config": f.config} for f in figures],
+        "layouts": [{"name": x.name, "config": x.config} for x in db.execute(select(Layout).where(Layout.project_id == p.id).order_by(Layout.created_at)).scalars()],
     }
+    for d in datasets:
+        entry = {"id": d.id, "name": d.name, "version": d.version, "content": d.content}
+        if uploads is not None:  # a .fio file: full history and the original files
+            entry["history"] = [
+                {"version": v.version, "content": v.content, "change_note": v.change_note, "created_at": v.created_at.isoformat() if v.created_at else None}
+                for v in db.execute(select(DatasetVersion).where(DatasetVersion.dataset_id == d.id).order_by(DatasetVersion.version)).scalars()
+            ]
+            entry["source_upload_id"] = d.source_upload_id
+        doc["datasets"].append(entry)
+    if uploads is not None:
+        doc["uploads"] = []
+        for i, up in enumerate(db.execute(select(RawUpload).where(RawUpload.project_id == p.id).order_by(RawUpload.created_at)).scalars(), 1):
+            path = f"uploads/{i}"
+            uploads[path] = up.content
+            doc["uploads"].append({"id": up.id, "filename": up.filename, "content_type": up.content_type, "path": path})
+    if styles_of is not None:
+        doc["styles"] = [{"name": st.name, "description": st.description, "settings": st.settings}
+                         for st in db.execute(select(FigureStyle).where(FigureStyle.owner_id == styles_of.id).order_by(FigureStyle.created_at)).scalars()]
     return doc
 
 
+def _read_fio(raw: bytes) -> tuple[dict, dict[str, bytes]]:
+    unreadable = HTTPException(422, detail={"code": "archive_unreadable", "message": {
+        "fr": "Ce fichier n’est pas un projet Fiole (.fio).", "en": "This file is not a Fiole project (.fio)."}})
+    files: dict[str, bytes] = {}
+    if raw[:2] == b"PK":
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                if sum(i.file_size for i in z.infolist()) > FIO_MAX_UNZIPPED:
+                    raise unreadable
+                doc = json.loads(z.read("fiole.json").decode("utf-8"))
+                for u in doc.get("uploads") or []:
+                    path = str(u.get("path", ""))
+                    if path in z.namelist():
+                        files[path] = z.read(path)
+        except HTTPException:
+            raise
+        except Exception:
+            raise unreadable
+    else:
+        try:
+            doc = json.loads(raw.decode("utf-8-sig"))
+        except Exception:
+            raise unreadable
+    if not isinstance(doc, dict) or doc.get("format") != ARCHIVE_FORMAT or not isinstance(doc.get("project"), dict):
+        raise unreadable
+    return doc, files
+
+
 @app.post("/api/projects/import-archive")
-async def import_archive(file: UploadFile = File(...), user: User = Depends(current_user), db: Session = Depends(get_db)):
-    try:
-        doc = json.loads((await file.read()).decode("utf-8"))
-    except Exception:
-        raise HTTPException(422, detail={"code": "archive_unreadable"})
-    if doc.get("format") != ARCHIVE_FORMAT:
-        raise HTTPException(422, detail={"code": "archive_unreadable"})
-    return _import_doc(db, user, doc, "project.import_archive")
+async def import_archive(file: UploadFile = File(...), folder_id: str | None = Form(default=None),
+                         user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Open a .fio file (or an older .fiole.json export): creates a new project of mine with everything in it."""
+    raw = await file.read()
+    if len(raw) > max(MAX_UPLOAD_BYTES, 200 * 1024 * 1024):
+        raise HTTPException(413, detail={"code": "file_too_large"})
+    doc, files = _read_fio(raw)
+    folders_lib._mine(db, user, folder_id or None)
+    return _import_doc(db, user, doc, "project.open_fio", folder_id or None, files)
 
 
-def _import_doc(db: Session, user: User, doc: dict, action: str) -> dict:
-    p = Project(name=doc["project"]["name"], description=doc["project"].get("description", ""), owner_id=user.id)
+def _import_doc(db: Session, user: User, doc: dict, action: str, folder_id: str | None = None,
+                files: dict[str, bytes] | None = None) -> dict:
+    name = (str(doc["project"].get("name") or "Projet").strip() or "Projet")[:300]
+    p = Project(name=name, description=doc["project"].get("description", "") or "", owner_id=user.id)
     db.add(p)
     db.flush()
     db.add(ProjectMember(project_id=p.id, user_id=user.id, role=Role.owner, added_by=user.id, last_opened_at=utcnow()))
+    folders_lib.place(db, user, p.id, folder_id)
+    up_map: dict[str, str] = {}
+    for u in doc.get("uploads") or []:
+        data = (files or {}).get(str(u.get("path", "")))
+        if data is None:
+            continue
+        nu = RawUpload(project_id=p.id, filename=str(u.get("filename") or "fichier")[:500], content_type=str(u.get("content_type") or "")[:200],
+                       content=data, uploaded_by=user.id)
+        db.add(nu)
+        db.flush()
+        up_map[u.get("id")] = nu.id
     ds_map, a_map, f_map = {}, {}, {}
     for d in doc.get("datasets", []):
-        nd = Dataset(project_id=p.id, name=d["name"], content=validate_content(d["content"]), updated_by=user.id)
+        content = validate_content(d["content"])
+        versions: dict[int, dict] = {}
+        for h in d.get("history") or []:
+            try:
+                versions[int(h["version"])] = {"content": validate_content(h["content"]), "note": str(h.get("change_note") or "")}
+            except Exception:
+                continue
+        current = int(d.get("version") or 1) if versions else 1
+        versions[current] = {"content": content, "note": versions.get(current, {}).get("note") or "imported from archive"}
+        nd = Dataset(project_id=p.id, name=d["name"], content=content, version=current, updated_by=user.id,
+                     source_upload_id=up_map.get(d.get("source_upload_id")))
         db.add(nd)
         db.flush()
-        db.add(DatasetVersion(dataset_id=nd.id, version=1, content=nd.content, change_note="imported from archive", created_by=user.id))
+        for v in sorted(versions):
+            db.add(DatasetVersion(dataset_id=nd.id, version=v, content=versions[v]["content"], change_note=versions[v]["note"], created_by=user.id))
         ds_map[d["id"]] = nd.id
     for a in doc.get("analyses", []):
         if a["dataset_id"] not in ds_map:
@@ -1768,7 +1868,7 @@ def _import_doc(db: Session, user: User, doc: dict, action: str) -> dict:
         for ann in cfg.get("annotations") or []:
             if ann.get("analysis_id") in a_map:
                 ann["analysis_id"] = a_map[ann["analysis_id"]]
-        nf = Figure(project_id=p.id, dataset_id=ds_map[f["dataset_id"]], name=f["name"], kind=cfg.get("type", "scatter_groups"), config=cfg)
+        nf = Figure(project_id=p.id, dataset_id=ds_map[f["dataset_id"]], name=f["name"], kind=f.get("kind") or cfg.get("type", "scatter_groups"), config=cfg)
         db.add(nf)
         db.flush()
         f_map[f.get("id")] = nf.id
@@ -1776,17 +1876,35 @@ def _import_doc(db: Session, user: User, doc: dict, action: str) -> dict:
         lc = dict(lay.get("config") or {})
         lc["panels"] = [{**pn, "figure_id": f_map[pn.get("figure_id")]} for pn in lc.get("panels") or [] if pn.get("figure_id") in f_map]
         db.add(Layout(project_id=p.id, name=lay.get("name") or "Layout", config=layout_lib.merged(lc)))
+    # the figure styles that came with the file join "My styles" (those I already have are not added twice)
+    styles_added = 0
+    have = {(st.name, json.dumps(st.settings, sort_keys=True)) for st in db.execute(select(FigureStyle).where(FigureStyle.owner_id == user.id)).scalars()}
+    for st in doc.get("styles") or []:
+        try:
+            clean = style_lib.extract(st.get("settings") or {})
+            sname = str(st.get("name") or "").strip()[:200]
+        except Exception:
+            continue
+        key = (sname, json.dumps(clean, sort_keys=True))
+        if not clean or not sname or key in have:
+            continue
+        db.add(FigureStyle(owner_id=user.id, name=sname, description=str(st.get("description") or ""), settings=clean))
+        have.add(key)
+        styles_added += 1
     audit(db, user, p.id, action, "project", p.id)
     db.commit()
     # Results are recomputed rather than trusted from the file.
     for old_id, new_id in a_map.items():
         a = db.get(Analysis, new_id)
         d = db.get(Dataset, a.dataset_id)
-        res = run_analysis(a.kind, d.content, a.config)
+        try:
+            res = run_analysis(a.kind, d.content, a.config)
+        except Exception:
+            continue
         res["dataset"] = {"id": d.id, "name": d.name, "version": d.version}
         db.add(AnalysisResult(analysis_id=a.id, analysis_version=a.version, dataset_version=d.version, result=res, engine_version=ENGINE, created_by=user.id))
     db.commit()
-    return {"id": p.id, "url": f"/p/{p.id}"}
+    return {"id": p.id, "url": f"/p/{p.id}", "name": p.name, "folder_id": folder_id, "styles_added": styles_added}
 
 
 @app.get("/api/health")

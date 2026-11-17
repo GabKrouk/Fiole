@@ -11,6 +11,7 @@ import LayoutView from "../components/LayoutView";
 import ImportDialog from "../components/ImportDialog";
 import ShareDialog from "../components/ShareDialog";
 import ProjectMenu from "../components/ProjectMenu";
+import { saveFio } from "../lib/fio";
 import NoAccess from "../components/NoAccess";
 import { BUILD } from "../theme";
 import Modal from "../components/Modal";
@@ -119,6 +120,21 @@ export default function ProjectPage() {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, [project, loc.pathname, lang, reload, nav]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Cmd/Ctrl+S: save the project to a .fio file (everything is already saved online as you work)
+  const saveFile = useCallback(async () => {
+    if (!project) return;
+    try {
+      if (await saveFio(project.id, project.name)) flash(lang === "fr" ? "Projet enregistré dans un fichier .fio." : "Project saved to a .fio file.");
+    } catch { flash(lang === "fr" ? "L’enregistrement a échoué." : "Saving failed."); }
+  }, [project, lang]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "s") { e.preventDefault(); saveFile(); }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [saveFile]);
 
   if (notFound) return <NoAccess projectId={projectId!} />;
   if (!project) return <TopBar />;
@@ -300,7 +316,7 @@ export default function ProjectPage() {
           <section>
             <h4>{t("export")}</h4>
             <a className="side-item" href={`/api/projects/${project.id}/results.csv?lang=${lang}`}>{t("exportResults")}</a>
-            <a className="side-item" href={`/api/projects/${project.id}/archive`}>{t("exportArchive")} (.fiole.json)</a>
+            <button className="side-item" onClick={saveFile} title={lang === "fr" ? "Données, analyses, figures, mises en page et vos styles, dans un fichier à partager. Raccourci : Ctrl/Cmd+S" : "Data, analyses, figures, layouts and your styles, in one file to share. Shortcut: Ctrl/Cmd+S"}>💾 {t("exportArchive")} (.fio)</button>
             <button className="side-item" disabled>{t("reportSoon")} <span className="badge soon">{t("comingSoon")}</span></button>
           </section>
           <section>
