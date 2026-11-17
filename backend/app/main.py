@@ -1126,7 +1126,7 @@ def export_figure(
 
 # ------------------------------------------------------------------ duplicate figures (one per variable)
 
-Y_KEYS = ("y_min", "y_max", "y_tick_step", "y_scale", "y_label", "y_unit")
+Y_KEYS = ("y_min", "y_max", "y_tick_step", "y_scale", "y_label", "y_unit", "y_break_from", "y_break_to", "y_break_pos")
 GROUP_TYPES = ("scatter_groups", "bar", "box", "violin")
 
 

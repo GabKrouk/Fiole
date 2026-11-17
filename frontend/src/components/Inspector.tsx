@@ -2,6 +2,7 @@ import { ReactNode } from "react";
 import { useI18n } from "../i18n";
 import type { Selection } from "./FigureCanvas";
 import RichInput from "./RichText";
+import AxisBreak from "./AxisBreak";
 
 type Cfg = Record<string, any>;
 
@@ -65,6 +66,7 @@ export default function Inspector({ sel, cfg, set, canEdit, isGroup, colorOf, ro
         <div className="grid2">{Txt(T("Titre de l’axe", "Axis title"), "y_label")}{Txt(T("Unité", "Unit"), "y_unit", false)}</div>
         <div className="grid3">{N("min", "y_min")}{N("max", "y_max")}{N(T("Pas des graduations", "Tick spacing"), "y_tick_step")}</div>
         {S(T("Échelle", "Scale"), "y_scale", [["linear", t("scaleLinear")], ["log10", t("scaleLog")]], "linear")}
+        <AxisBreak ax="y" cfg={cfg} set={set} canEdit={canEdit} fr={fr} />
         {ticks}
         {N(t("fontSize"), "font_size_pt", 0.5)}
       </>;
@@ -75,7 +77,8 @@ export default function Inspector({ sel, cfg, set, canEdit, isGroup, colorOf, ro
       body = <>
         <div className="grid2">{Txt(T("Titre de l’axe", "Axis title"), "x_label")}{!isGroup && Txt(T("Unité", "Unit"), "x_unit", false)}</div>
         {!isGroup && <><div className="grid3">{N("min", "x_min")}{N("max", "x_max")}{N(T("Pas des graduations", "Tick spacing"), "x_tick_step")}</div>
-          {S(T("Échelle", "Scale"), "x_scale", [["linear", t("scaleLinear")], ["log10", t("scaleLog")]], "linear")}</>}
+          {S(T("Échelle", "Scale"), "x_scale", [["linear", t("scaleLinear")], ["log10", t("scaleLog")]], "linear")}
+          <AxisBreak ax="x" cfg={cfg} set={set} canEdit={canEdit} fr={fr} /></>}
         {ticks}
         {N(t("fontSize"), "font_size_pt", 0.5)}
       </>;

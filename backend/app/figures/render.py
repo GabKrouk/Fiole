@@ -78,6 +78,9 @@ DEFAULTS = {
     "y_tick_step": None,
     "x_tick_step": None,
     "fill_opacity": 0.3,
+    # broken axes (Prism-like): hide the range from → to; pos = % of the axis length for the lower segment
+    "y_break_from": None, "y_break_to": None, "y_break_pos": None,
+    "x_break_from": None, "x_break_to": None, "x_break_pos": None,
     "title_dx": 0.0, "title_dy": 0.0,   # title offset (pt), set by dragging
     "legend_dx": 0.0, "legend_dy": 0.0,  # legend offset (pt), set by dragging
 }
@@ -92,31 +95,137 @@ ERROR_LABEL = {
 }
 
 
+BREAK_GAP = 6.0  # pt of empty axis between the two segments of a broken axis
+
+
 @dataclass
 class Scale:
+    """Value → position. With `brk` = (b0, b1) the axis is broken (Prism-like): values from lo to b0 fill the
+    first segment, b1 to hi the second, and the hidden range b0–b1 is a small empty gap of BREAK_GAP pt.
+    `frac` is the share of the axis length given to the first segment (None: same scale on both segments)."""
     lo: float
     hi: float
     p0: float
     p1: float
     log: bool = False
+    brk: tuple[float, float] | None = None
+    frac: float | None = None
+
+    def _t(self, v: float) -> float:
+        if self.log:
+            return math.log10(v) if v > 0 else math.log10(self.lo) if self.lo > 0 else 0.0
+        return v
+
+    def gap(self) -> tuple[float, float] | None:
+        """Positions of the two edges of the break (at b0 and at b1), or None."""
+        if not self.brk:
+            return None
+        lo, hi, a, b = self._t(self.lo), self._t(self.hi), self._t(self.brk[0]), self._t(self.brk[1])
+        if not (lo < a < b < hi):
+            return None
+        span = self.p1 - self.p0
+        sign = 1.0 if span >= 0 else -1.0
+        usable = max(abs(span) - BREAK_GAP, 1.0)
+        f = self.frac if self.frac is not None else auto_frac(lo, hi, a, b)
+        f = min(max(f, 0.05), 0.95)
+        pa = self.p0 + sign * usable * f
+        return pa, pa + sign * min(BREAK_GAP, abs(span) * 0.3)
+
+    def hidden(self, v: float) -> bool:
+        """True for a value inside the hidden range of a broken axis."""
+        return bool(self.gap()) and self.brk[0] < v < self.brk[1]
 
     def __call__(self, v: float) -> float:
-        if self.log:
-            v = math.log10(v) if v > 0 else math.log10(self.lo_raw)
-            lo, hi = math.log10(self.lo_raw), math.log10(self.hi_raw)
-        else:
-            lo, hi = self.lo, self.hi
+        lo, hi, v = self._t(self.lo), self._t(self.hi), self._t(v)
         if hi == lo:
             return (self.p0 + self.p1) / 2
+        g = self.gap()
+        if g:
+            a, b = self._t(self.brk[0]), self._t(self.brk[1])
+            pa, pb = g
+            if v <= a:
+                return self.p0 + (v - lo) / (a - lo) * (pa - self.p0)
+            if v >= b:
+                return pb + (v - b) / (hi - b) * (self.p1 - pb)
+            return pa + (v - a) / (b - a) * (pb - pa)
         return self.p0 + (v - lo) / (hi - lo) * (self.p1 - self.p0)
 
-    @property
-    def lo_raw(self):
-        return self.lo
 
-    @property
-    def hi_raw(self):
-        return self.hi
+def auto_frac(lo: float, hi: float, a: float, b: float) -> float:
+    """Share of the axis for the first segment: the same scale on both sides, unless one segment would be
+    squeezed below 30 % (unreadable): then 30 / 70."""
+    f = (a - lo) / ((a - lo) + (hi - b))
+    return min(max(f, 0.3), 0.7)
+
+
+def axis_break(cfg: dict, ax: str, lo: float, hi: float) -> tuple[tuple[float, float] | None, float | None, dict | None]:
+    """The break asked for on axis `ax` ("y" or "x"): ((from, to), first-segment share, warning).
+    Only a break strictly inside the axis range is kept."""
+    a, b = cfg.get(f"{ax}_break_from"), cfg.get(f"{ax}_break_to")
+    try:
+        a, b = float(a), float(b)
+    except (TypeError, ValueError):
+        return None, None, None
+    if not (math.isfinite(a) and math.isfinite(b)) or a == b:
+        return None, None, None
+    a, b = min(a, b), max(a, b)
+    A = ax.upper()
+    if not (lo < a and b < hi):
+        return None, None, {"en": f"The {A} axis break ({fmt_tick(a)} to {fmt_tick(b)}) must lie inside the axis range ({fmt_tick(lo)} to {fmt_tick(hi)}): it is not drawn.",
+                            "fr": f"La coupure de l’axe {A} ({fmt_tick(a)} à {fmt_tick(b)}) doit être comprise dans l’étendue de l’axe ({fmt_tick(lo)} à {fmt_tick(hi)}) : elle n’est pas tracée."}
+    frac = None
+    pos = cfg.get(f"{ax}_break_pos")
+    try:
+        if pos not in (None, ""):
+            frac = min(max(float(pos) / 100.0, 0.05), 0.95)
+    except (TypeError, ValueError):
+        frac = None
+    return (a, b), frac, None
+
+
+def broken_ticks(ticks: list[float], lo: float, hi: float, brk, frac, log: bool, step=None) -> list[float]:
+    """Ticks of a broken axis: each segment gets its own round ticks (so a short segment is still labelled)."""
+    a, b = brk
+    if log or step:
+        return [v for v in ticks if not (a < v < b)]
+    f = frac if frac is not None else auto_frac(lo, hi, a, b)
+    lower = ticks_in(lo, a, max(2, round(6 * f)))
+    upper = ticks_in(b, hi, max(2, round(6 * (1 - f))))
+    return lower + [v for v in upper if v not in lower]
+
+
+def break_marks(svg: "SVG", along: str, at: float, g: tuple[float, float], lw: float):
+    """Two short parallel slashes (//) across the axis line at the two edges of the gap."""
+    d = 3.2
+    for p in g:
+        if along == "y":
+            svg.line(at - d, p + d * 0.6, at + d, p - d * 0.6, width=lw)
+        else:
+            svg.line(p - d * 0.6, at + d, p + d * 0.6, at - d, width=lw)
+
+
+def axis_line(svg: "SVG", along: str, at: float, p0: float, p1: float, g, lw: float):
+    """An axis line, interrupted at the break with // marks."""
+    if along == "y":
+        seg = lambda u, v: svg.line(at, u, at, v, width=lw)  # noqa: E731
+    else:
+        seg = lambda u, v: svg.line(u, at, v, at, width=lw)  # noqa: E731
+    if not g:
+        seg(p0, p1)
+        return
+    seg(p0, g[0])
+    seg(g[1], p1)
+    break_marks(svg, along, at, g, lw)
+
+
+def plot_clip(svg: "SVG", left: float, right: float, top: float, bottom: float, ys: Scale, xs: Scale | None = None):
+    """Clip path of the plot area; a broken axis leaves its gap empty, so bars, curves and error bars are cut there."""
+    yg = ys.gap()
+    ybands = [(top - 1, bottom)] if not yg else [(top - 1, min(yg)), (max(yg), bottom)]
+    xg = xs.gap() if xs else None
+    xbands = [(left, right)] if not xg else [(left, min(xg)), (max(xg), right)]
+    rects = "".join(f'<rect x="{x0:.2f}" y="{y0:.2f}" width="{x1 - x0:.2f}" height="{y1 - y0:.2f}"/>' for x0, x1 in xbands for y0, y1 in ybands)
+    svg.add(f'<clipPath id="plotclip">{rects}</clipPath>')
 
 
 def nice_step(span: float, target: int = 5) -> float:
@@ -142,8 +251,8 @@ def nice_range(lo: float, hi: float, include_zero: bool) -> tuple[float, float, 
     return nlo, nhi, ticks
 
 
-def ticks_in(lo: float, hi: float) -> list[float]:
-    step = nice_step(hi - lo)
+def ticks_in(lo: float, hi: float, target: int = 5) -> list[float]:
+    step = nice_step(hi - lo, target)
     start = math.ceil(lo / step - 1e-9) * step
     out = []
     v = start
@@ -508,9 +617,17 @@ def _frame(svg: SVG, cfg: dict, n_cats: int | None, xlabels: list[str] | None, y
     if bottom - top < 20 or right - left < 20:
         raise _err("The figure is too small for its text. Increase the size or reduce the font.", "La figure est trop petite pour son texte. Agrandissez-la ou réduisez la police.")
 
-    ys = Scale(ylo, yhi, bottom, top, log)
+    ybrk, yfrac, _w = axis_break(cfg, "y", ylo, yhi)
+    ys = Scale(ylo, yhi, bottom, top, log, ybrk, yfrac)
     # never let tick labels overlap: keep every k-th tick when the plot is short for the font
-    if not log and len(yticks) > 2:
+    if ys.gap():
+        kept, last = [], None
+        for v in sorted(yticks):
+            if last is None or abs(ys(v) - ys(last)) >= fs * 1.2:
+                kept.append(v)
+                last = v
+        yticks = kept
+    elif not log and len(yticks) > 2:
         step = abs(yticks[1] - yticks[0]) or 1.0
         gap = abs(ys(yticks[0]) - ys(yticks[1]))
         if gap < fs * 1.35:
@@ -527,7 +644,7 @@ def _frame(svg: SVG, cfg: dict, n_cats: int | None, xlabels: list[str] | None, y
         svg.close()
     # y axis
     svg.open("y-axis")
-    svg.line(left, top, left, bottom, width=lw)
+    axis_line(svg, "y", left, bottom, top, ys.gap(), lw)
     draw_y_ticks(svg, cfg, left, ys, yticks, ylo, yhi, log)
     for v in yticks:
         svg.text(left - out - 1.5, ys(v) + fs * 0.35, fmt_tick(v), anchor="end")
@@ -541,14 +658,16 @@ def _frame(svg: SVG, cfg: dict, n_cats: int | None, xlabels: list[str] | None, y
         svg.open("y-label")
         svg.text(3 + fs * 0.85, (top + bottom) / 2, ylab, size=lsize, rotate=-90)
         svg.close()
-    # x axis line (ticks are drawn by the caller)
-    svg.open("x-axis")
-    svg.line(left, bottom, right, bottom, width=lw)
-    svg.close()
+    # x axis line (ticks are drawn by the caller; a broken X axis line is drawn by the caller too)
+    if xscale is None:
+        svg.open("x-axis")
+        svg.line(left, bottom, right, bottom, width=lw)
+        svg.close()
     if cfg.get("frame") == "closed":
         svg.open("frame")
-        svg.line(left, top, right, top, width=lw)
-        svg.line(right, top, right, bottom, width=lw)
+        if xscale is None:
+            svg.line(left, top, right, top, width=lw)
+        axis_line(svg, "y", right, bottom, top, ys.gap(), lw)
         svg.close()
     if xlab:
         svg.open("x-label")
@@ -570,6 +689,16 @@ def _group_values_range(sel: list[Group], cfg: dict) -> tuple[float, float]:
 
 
 def _y_axis(cfg: dict, lo: float, hi: float, include_zero: bool, warnings: list) -> tuple[float, float, list[float], bool]:
+    ylo, yhi, ticks, log = _y_axis_plain(cfg, lo, hi, include_zero, warnings)
+    brk, frac, warn = axis_break(cfg, "y", ylo, yhi)
+    if warn and warn not in warnings:
+        warnings.append(warn)
+    if brk:
+        ticks = broken_ticks(ticks, ylo, yhi, brk, frac, log, cfg.get("y_tick_step"))
+    return ylo, yhi, ticks, log
+
+
+def _y_axis_plain(cfg: dict, lo: float, hi: float, include_zero: bool, warnings: list) -> tuple[float, float, list[float], bool]:
     log = cfg["y_scale"] == "log10"
     if log:
         if lo <= 0:
@@ -656,7 +785,7 @@ def draw_y_ticks(svg, cfg, left, ys, ticks, lo, hi, log):
         if out or inn:
             svg.line(left - out, ys(v), left + inn, ys(v), width=lw)
     for v in minor_positions(ticks, int(cfg.get("minor_ticks") or 0), log, lo, hi):
-        if out or inn:
+        if (out or inn) and not ys.hidden(v) and not (ys.brk and v in ys.brk):
             svg.line(left - out * 0.55, ys(v), left + inn * 0.55, ys(v), width=lw * 0.8)
 
 
@@ -667,7 +796,7 @@ def draw_x_ticks(svg, cfg, bottom, xs, ticks, lo, hi, log):
         if out or inn:
             svg.line(xs(v), bottom - inn, xs(v), bottom + out, width=lw)
     for v in minor_positions(ticks, int(cfg.get("minor_ticks") or 0), log, lo, hi):
-        if out or inn:
+        if (out or inn) and not xs.hidden(v) and not (xs.brk and v in xs.brk):
             svg.line(xs(v), bottom - inn * 0.55, xs(v), bottom + out * 0.55, width=lw * 0.8)
 
 
@@ -779,7 +908,11 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
             if auto_range and needed + 2.0 < hp * 0.65:
                 # solve (yhi - hi) / (yhi - ylo) * hp >= needed + 2 for yhi, then let nice_range round it up
                 want = needed + 2.0
-                hi_target = max(hi_target, (hi * hp - want * ylo) / (hp - want)) + (hi - lo or 1.0) * 1e-3
+                if pys.gap() and hi >= pys.brk[1]:
+                    # broken axis: only the upper segment grows; step up until the stack fits
+                    hi_target = max(hi_target, yhi) + (yhi - pys.brk[1]) * 0.2
+                else:
+                    hi_target = max(hi_target, (hi * hp - want * ylo) / (hp - want)) + (hi - lo or 1.0) * 1e-3
                 ylo, yhi, yticks, log = _y_axis(cfg, lo, hi_target, include_zero=include_zero, warnings=[])
                 continue
             above_plot = True  # fixed Y range (or log scale): the stack goes above the plot
@@ -789,7 +922,12 @@ def _render_groups(svg: SVG, cfg: dict, sel: list[Group], results: dict, warning
     left, right, top, bottom, ys, rotate = _frame(svg, cfg, len(sel), labels, ylo, yhi, yticks, log, extra_top=extra_top)
 
     band = (right - left) / len(sel)
-    svg.add(f'<clipPath id="plotclip"><rect x="{left:.2f}" y="{top - 1:.2f}" width="{right - left:.2f}" height="{bottom - top + 1:.2f}"/></clipPath>')
+    plot_clip(svg, left, right, top, bottom, ys)
+    if ys.gap():
+        hidden = sum(1 for g in sel for v in g.values if ys.hidden(v))
+        if hidden:
+            warnings.append({"en": f"{hidden} value(s) fall inside the Y axis break and are not shown.",
+                             "fr": f"{hidden} valeur(s) tombent dans la coupure de l’axe Y et ne sont pas affichées."})
     svg.add('<g clip-path="url(#plotclip)">')
     centers = {}
     t = cfg["type"]
@@ -1093,10 +1231,31 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
         if cfg.get("x_ticks") == "data" and len(distinct_x) <= 20:
             xticks = [v for v in distinct_x if xlo <= v <= xhi]
     fs, lw = cfg["font_size_pt"], cfg["line_width_pt"]
-    left, right, top, bottom, ys, _ = _frame(svg, cfg, None, None, ylo, yhi, yticks, ylog, extra_top=n_star_rows * fs * 1.05)
-    xs = Scale(xlo, xhi, left + 4, right - 4, xlog)
+    left, right, top, bottom, ys, _ = _frame(svg, cfg, None, None, ylo, yhi, yticks, ylog, extra_top=n_star_rows * fs * 1.05, xscale=True)
+    xbrk, xfrac, xwarn = axis_break(cfg, "x", xlo, xhi)
+    if xwarn:
+        warnings.append(xwarn)
+    xs = Scale(xlo, xhi, left + 4, right - 4, xlog, xbrk, xfrac)
     if not xlog and cfg.get("x_ticks") != "data":
         xticks = stepped_ticks(xlo, xhi, cfg.get("x_tick_step")) or xticks
+    xg = xs.gap()
+    if xg:
+        if cfg.get("x_ticks") == "data":
+            xticks = [v for v in xticks if not xs.hidden(v)]
+        else:
+            xticks = broken_ticks(xticks, xlo, xhi, xbrk, xfrac, xlog, cfg.get("x_tick_step"))
+    hidden = sum(1 for _, s in series for x, y in s if (xg and xs.hidden(x)) or ys.hidden(y))
+    if hidden:
+        warnings.append({"en": f"{hidden} point(s) fall inside an axis break and are not shown.",
+                         "fr": f"{hidden} point(s) tombent dans une coupure d’axe et ne sont pas affichés."})
+    # X axis line (and the top of a closed frame), interrupted at an X break
+    svg.open("x-axis")
+    axis_line(svg, "x", bottom, left, right, (xg[0], xg[1]) if xg else None, lw)
+    svg.close()
+    if cfg.get("frame") == "closed":
+        svg.open("frame")
+        axis_line(svg, "x", top, left, right, (xg[0], xg[1]) if xg else None, lw)
+        svg.close()
     out, _inn = tick_span(cfg)
     svg.open("x-axis")
     draw_x_ticks(svg, cfg, bottom, xs, xticks, xlo, xhi, xlog)
@@ -1110,7 +1269,7 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
         svg.text(xs(v), bottom + out + 1.5 + fs, lab)
         last_end = xs(v) + wl / 2
     svg.close()
-    svg.add(f'<clipPath id="plotclip"><rect x="{left:.2f}" y="{top - 1:.2f}" width="{right - left:.2f}" height="{bottom - top + 1:.2f}"/></clipPath>')
+    plot_clip(svg, left, right, top, bottom, ys, xs)
     svg.add('<g clip-path="url(#plotclip)">')
     counts = []
     marks: list[tuple[float, float]] = []  # drawn positions, to keep the legend off the data
@@ -1164,6 +1323,8 @@ def _render_xy(svg: SVG, cfg: dict, content: dict, warnings: list, lang: str) ->
         svg.open("x-stars")
         placed: list[tuple[float, float, float]] = []  # (x0, x1, baseline) of labels already drawn
         for x, k, lab in star_rows:
+            if xg and xs.hidden(x):
+                continue
             color = "#000" if len(series) == 2 else color_for(cfg, series[k + 1][0], k + 1)
             y0 = max(min(top_at.get(x, top), bottom), top - n_star_rows * fs * 1.05 + fs) - 2.5 - k * fs * 1.05
             size = fs if lab.startswith("*") or lab == "ns" else fs * 0.85
@@ -1311,7 +1472,7 @@ def _render_clustered(svg: SVG, cfg: dict, content: dict, warnings: list, lang: 
     inner = band * 0.84 / len(subs)
     half = inner * 0.38
     fo = float(cfg.get("fill_opacity", 0.3))
-    svg.add(f'<clipPath id="plotclip"><rect x="{left:.2f}" y="{top - 1:.2f}" width="{right - left:.2f}" height="{bottom - top + 1:.2f}"/></clipPath>')
+    plot_clip(svg, left, right, top, bottom, ys)
     svg.add('<g clip-path="url(#plotclip)">')
     pos: dict[tuple[str, str], float] = {}
     top_at: dict[tuple[str, str], float] = {}
@@ -1445,7 +1606,7 @@ def _render_panels(content: dict, cfg_in: dict, ycols: list[str], results: dict 
         sub = {**(cfg_in or {}), "y": [yc], "y_layout": "overlay", "title": "", "annotations": [],
                "width_mm": cw / MM, "height_mm": ch / MM, "colors": colors, "group_order": order or None,
                "y_label": y_labels.get(yc) or "", "y_unit": "", "y_min": None, "y_max": None, "y_tick_step": None,
-               **({k2: v for k2, v in ((cfg.get("per_panel") or {}).get(yc) or {}).items() if k2 in ("y_min", "y_max", "y_tick_step", "y_scale")}),
+               **({k2: v for k2, v in ((cfg.get("per_panel") or {}).get(yc) or {}).items() if k2 in ("y_min", "y_max", "y_tick_step", "y_scale", "y_break_from", "y_break_to", "y_break_pos")}),
                "legend": cfg["legend"] if k == 0 else False}
         try:
             out = render_figure(content, sub, results, lang)

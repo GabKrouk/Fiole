@@ -7,6 +7,7 @@ import { groupNames, StepButtons } from "./AnalysisView";
 import { factorColumns, levels, numericColumns, stepColumns } from "../columns";
 import FigureCanvas, { Selection } from "./FigureCanvas";
 import RichInput from "./RichText";
+import AxisBreak from "./AxisBreak";
 import StyleMenu from "./StyleMenu";
 import ResizeBox from "./ResizeBox";
 import Modal from "./Modal";
@@ -33,7 +34,7 @@ const PALETTES: Record<string, string[]> = {
   tol_muted: ["#332288", "#88CCEE", "#44AA99", "#117733", "#999933", "#DDCC77", "#CC6677", "#882255", "#AA4499"],
   grayscale: ["#1A1A1A", "#737373", "#B3B3B3", "#404040", "#999999", "#D9D9D9"],
 };
-const Y_KEYS = ["y_min", "y_max", "y_tick_step", "y_scale", "y_label", "y_unit"];
+const Y_KEYS = ["y_min", "y_max", "y_tick_step", "y_scale", "y_label", "y_unit", "y_break_from", "y_break_to", "y_break_pos"];
 const GROUP_TYPES = ["scatter_groups", "bar", "box", "violin"];
 const XY_TYPES = ["xy", "line"];
 const STYLE_KEEP = ["font_family", "font_size_pt", "title_size_pt", "line_width_pt", "point_size_pt", "point_shape", "palette", "colors", "frame",
@@ -637,6 +638,8 @@ export default function FigureView({ ctx }: { ctx: ProjectCtx }) {
                 {!isGroup && <label className="field"><span>{lang === "fr" ? "Pas X" : "X step"}</span>
                   <input type="number" step="any" value={cfg.x_tick_step ?? ""} disabled={!canEdit} onChange={(e) => set({ x_tick_step: num(e.target.value) })} /></label>}
               </div>
+              <AxisBreak ax="y" cfg={cfg} set={set} canEdit={canEdit} fr={lang === "fr"} />
+              {!isGroup && <AxisBreak ax="x" cfg={cfg} set={set} canEdit={canEdit} fr={lang === "fr"} />}
             </div>
           </details>
           <details>
